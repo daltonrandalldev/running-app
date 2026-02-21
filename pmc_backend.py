@@ -98,6 +98,9 @@ MIGRATIONS = [
         updated_at  TIMESTAMPTZ      NOT NULL DEFAULT now()
     )
     """,
+    # Grant SELECT to anon + authenticated so the Supabase JS client can read these tables
+    "GRANT SELECT ON pmc_daily    TO anon, authenticated",
+    "GRANT SELECT ON lthr_settings TO anon, authenticated",
 ]
 
 # ─── MATH ─────────────────────────────────────────────────────────────────────
