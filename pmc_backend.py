@@ -196,22 +196,22 @@ def determine_active_load(
     is_run: bool,
     pace_load_flat: Optional[float],
     pace_load_gap: Optional[float],
-    trimp_score: Optional[float],
+    hr_tss_score: Optional[float],
     has_elevation: bool,
 ) -> Optional[float]:
     """
     Priority (highest to lowest):
       1. Running + elevation → pace_load_gap
       2. Running             → pace_load_flat
-      3. Non-running with HR → trimp
-      4. Otherwise           → None (NULL in DB)
+      3. Any activity with HR → hr_tss
+      4. Otherwise            → None (NULL in DB)
     """
     if is_run and has_elevation and pace_load_gap is not None:
         return pace_load_gap
     if is_run and pace_load_flat is not None:
         return pace_load_flat
-    if trimp_score is not None and trimp_score > 0:
-        return trimp_score
+    if hr_tss_score is not None and hr_tss_score > 0:
+        return hr_tss_score
     return None
 
 
@@ -403,7 +403,7 @@ def main() -> None:
                         )
 
                     has_elev = (elev_gain is not None and float(elev_gain) > 0)
-                    _active  = determine_active_load(is_run, _flat, _gap, _trimp, has_elev)
+                    _active  = determine_active_load(is_run, _flat, _gap, _hr_tss, has_elev)
 
                     activity_updates.append({
                         "id"             : act_id,
