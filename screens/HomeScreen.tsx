@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import Svg, { Path, Line, Text as SvgText } from 'react-native-svg';
 import {
   View,
   Text,
@@ -24,6 +25,142 @@ type Props = CompositeScreenProps<
   BottomTabScreenProps<MainTabParamList, 'Home'>,
   NativeStackScreenProps<RootStackParamList>
 >;
+
+type PMCDay = {
+  date: string;
+  ctl: number;
+  atl: number;
+  tsb: number;
+};
+
+const PMC_WINDOW_DAYS = 90;
+
+function formatDateLabel(dateStr: string): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function MetricChip({ label, value, color }: { label: string; value: string; color: string }) {
+  return (
+    <View style={{ alignItems: 'center', marginLeft: 12 }}>
+      <Text style={{ fontSize: 10, color: '#9ca3af' }}>{label}</Text>
+      <Text style={{ fontSize: 13, fontWeight: '700', color }}>{value}</Text>
+    </View>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+      <View style={{ width: 16, height: 2.5, backgroundColor: color, borderRadius: 2 }} />
+      <Text style={{ fontSize: 10, color: '#6b7280' }}>{label}</Text>
+    </View>
+  );
+}
+
+function PMCChart({ data }: { data: PMCDay[] }) {
+  if (data.length < 2) return null;
+
+  const CHART_W = SCREEN_WIDTH - 32;
+  const CHART_H = 180;
+  const PAD_L = 28;
+  const PAD_B = 22;
+  const PAD_T = 8;
+  const PAD_R = 8;
+  const PLOT_W = CHART_W - PAD_L - PAD_R;
+  const PLOT_H = CHART_H - PAD_B - PAD_T;
+
+  const maxY = Math.max(...data.map((d) => Math.max(d.ctl, d.atl)), 1);
+  const minY = Math.min(...data.map((d) => d.tsb), 0);
+  const range = maxY - minY || 1;
+
+  const xScale = (i: number) => PAD_L + (i / (data.length - 1)) * PLOT_W;
+  const yScale = (v: number) => PAD_T + PLOT_H - ((v - minY) / range) * PLOT_H;
+
+  const makePath = (getter: (d: PMCDay) => number) =>
+    data
+      .map((d, i) => `${i === 0 ? 'M' : 'L'}${xScale(i).toFixed(1)},${yScale(getter(d)).toFixed(1)}`)
+      .join(' ');
+
+  const xLabelStep = Math.ceil(data.length / 4);
+  const xLabelIndices: number[] = [];
+  for (let i = 0; i < data.length; i += xLabelStep) xLabelIndices.push(i);
+  if (xLabelIndices[xLabelIndices.length - 1] !== data.length - 1) {
+    xLabelIndices.push(data.length - 1);
+  }
+
+  const yTicks = [Math.round(maxY), Math.round(maxY / 2), 0];
+  if (minY < -1) yTicks.push(Math.round(minY));
+
+  const latest = data[data.length - 1];
+  const tsbColor = latest.tsb >= 5 ? '#2d7a2d' : latest.tsb >= -10 ? '#6b7280' : '#dc2626';
+
+  return (
+    <View style={{ marginHorizontal: 16, marginTop: 16, marginBottom: 4 }}>
+      {/* Header */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+        <Text style={{ fontSize: 17, fontWeight: '700', color: '#111827', flex: 1 }}>
+          Performance
+        </Text>
+        <MetricChip label="Fitness" value={latest.ctl.toFixed(0)} color="#6699cc" />
+        <MetricChip label="Fatigue" value={latest.atl.toFixed(0)} color="#7b5ea7" />
+        <MetricChip
+          label="Form"
+          value={(latest.tsb >= 0 ? '+' : '') + latest.tsb.toFixed(0)}
+          color={tsbColor}
+        />
+      </View>
+
+      {/* SVG */}
+      <Svg width={CHART_W} height={CHART_H}>
+        {/* Gridlines */}
+        {yTicks.map((v) => (
+          <Line
+            key={`g${v}`}
+            x1={PAD_L} y1={yScale(v)}
+            x2={PAD_L + PLOT_W} y2={yScale(v)}
+            stroke="#f3f4f6" strokeWidth={1}
+          />
+        ))}
+        {/* Zero line (TSB reference) */}
+        <Line
+          x1={PAD_L} y1={yScale(0)}
+          x2={PAD_L + PLOT_W} y2={yScale(0)}
+          stroke="#d1d5db" strokeWidth={1} strokeDasharray="4,3"
+        />
+        {/* Y labels */}
+        {yTicks.map((v) => (
+          <SvgText
+            key={`y${v}`}
+            x={PAD_L - 4} y={yScale(v) + 3.5}
+            fontSize={8} fill="#9ca3af" textAnchor="end"
+          >{v}</SvgText>
+        ))}
+        {/* ATL (behind CTL) */}
+        <Path d={makePath((d) => d.atl)} stroke="#7b5ea7" strokeWidth={1.5} fill="none" />
+        {/* CTL */}
+        <Path d={makePath((d) => d.ctl)} stroke="#6699cc" strokeWidth={2.5} fill="none" />
+        {/* TSB */}
+        <Path d={makePath((d) => d.tsb)} stroke="#2d7a2d" strokeWidth={1.5} fill="none" />
+        {/* X labels */}
+        {xLabelIndices.map((i) => (
+          <SvgText
+            key={`x${i}`}
+            x={xScale(i)} y={CHART_H - 4}
+            fontSize={8} fill="#9ca3af" textAnchor="middle"
+          >{formatDateLabel(data[i].date)}</SvgText>
+        ))}
+      </Svg>
+
+      {/* Legend */}
+      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 4 }}>
+        <LegendDot color="#6699cc" label="Fitness (CTL)" />
+        <LegendDot color="#7b5ea7" label="Fatigue (ATL)" />
+        <LegendDot color="#2d7a2d" label="Form (TSB)" />
+      </View>
+    </View>
+  );
+}
 
 type Activity = {
   id: number;
@@ -529,6 +666,7 @@ const PILL_TABS = [
 export default function HomeScreen({ navigation }: Props) {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [recentActivities, setRecentActivities] = useState<Activity[]>([]);
+  const [pmcData, setPmcData] = useState<PMCDay[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('Activities');
   const [hrZones, setHrZones] = useState<HRZones | null>(null);
@@ -545,7 +683,11 @@ export default function HomeScreen({ navigation }: Props) {
       const tenWeeksAgo = new Date();
       tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
 
-      const [chartRes, recentRes] = await Promise.all([
+      const pmcWindowStart = new Date();
+      pmcWindowStart.setDate(pmcWindowStart.getDate() - PMC_WINDOW_DAYS);
+      const pmcWindowStr = pmcWindowStart.toISOString().split('T')[0];
+
+      const [chartRes, recentRes, pmcRes] = await Promise.all([
         supabase
           .from('activities')
           .select(
@@ -560,10 +702,16 @@ export default function HomeScreen({ navigation }: Props) {
           )
           .order('start_time', { ascending: false })
           .limit(10),
+        supabase
+          .from('pmc_daily')
+          .select('date, ctl, atl, tsb')
+          .gte('date', pmcWindowStr)
+          .order('date', { ascending: true }),
       ]);
 
       if (chartRes.data) setActivities(chartRes.data);
       if (recentRes.data) setRecentActivities(recentRes.data);
+      if (pmcRes.data) setPmcData(pmcRes.data);
       setLoading(false);
     }
 
@@ -669,6 +817,14 @@ export default function HomeScreen({ navigation }: Props) {
           </View>
         ) : (
           <ChartCarousel activities={activities} hrZones={hrZones} />
+        )}
+
+        {/* PMC Chart */}
+        {!loading && pmcData.length > 0 && (
+          <View>
+            <View style={{ height: 1, backgroundColor: '#f3f4f6', marginTop: 4 }} />
+            <PMCChart data={pmcData} />
+          </View>
         )}
 
         {/* Section divider */}
