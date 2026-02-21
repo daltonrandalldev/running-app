@@ -683,10 +683,6 @@ export default function HomeScreen({ navigation }: Props) {
       const tenWeeksAgo = new Date();
       tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
 
-      const pmcWindowStart = new Date();
-      pmcWindowStart.setDate(pmcWindowStart.getDate() - PMC_WINDOW_DAYS);
-      const pmcWindowStr = pmcWindowStart.toISOString().split('T')[0];
-
       const [chartRes, recentRes, pmcRes] = await Promise.all([
         supabase
           .from('activities')
@@ -705,14 +701,14 @@ export default function HomeScreen({ navigation }: Props) {
         supabase
           .from('pmc_daily')
           .select('date, ctl, atl, tsb')
-          .gte('date', pmcWindowStr)
-          .order('date', { ascending: true }),
+          .order('date', { ascending: false })
+          .limit(PMC_WINDOW_DAYS),
       ]);
 
       if (chartRes.data) setActivities(chartRes.data);
       if (recentRes.data) setRecentActivities(recentRes.data);
       console.log('[PMC] rows:', pmcRes.data?.length, 'error:', pmcRes.error?.message);
-      if (pmcRes.data) setPmcData(pmcRes.data);
+      if (pmcRes.data) setPmcData([...pmcRes.data].reverse());
       setLoading(false);
     }
 
