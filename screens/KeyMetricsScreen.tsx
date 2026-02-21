@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
+import { loadHRZones, saveHRZones, type HRZones } from '../lib/hrZones';
 import {
   calculateVdot,
   predictTime,
@@ -42,16 +43,18 @@ type CardProps = {
   title: string;
   icon: keyof typeof Ionicons.glyphMap;
   children: React.ReactNode;
+  action?: React.ReactNode;
 };
 
-function Card({ title, icon, children }: CardProps) {
+function Card({ title, icon, children, action }: CardProps) {
   return (
     <View className="bg-white rounded-2xl p-5 mb-4 shadow-sm border border-gray-100">
       <View className="flex-row items-center mb-4">
         <View className="w-8 h-8 rounded-lg bg-blue-50 items-center justify-center mr-3">
           <Ionicons name={icon} size={18} color="#2563eb" />
         </View>
-        <Text className="text-base font-semibold text-gray-800">{title}</Text>
+        <Text className="text-base font-semibold text-gray-800 flex-1">{title}</Text>
+        {action}
       </View>
       {children}
     </View>
@@ -87,13 +90,30 @@ function formatDate(isoString: string): string {
   });
 }
 
-const HR_ZONE_COLORS = [
+const HR_ZONE_COLORS = ['#60a5fa', '#22c55e', '#eab308', '#f97316', '#ef4444'];
+const HR_ZONE_TEXT_CLASSES = [
   'text-blue-400',
   'text-green-500',
   'text-yellow-500',
   'text-orange-500',
   'text-red-500',
 ];
+
+type ZoneInputs = { min: string; max: string };
+
+function defaultZoneInputs(): ZoneInputs[] {
+  return [
+    { min: '', max: '' },
+    { min: '', max: '' },
+    { min: '', max: '' },
+    { min: '', max: '' },
+    { min: '', max: '' },
+  ];
+}
+
+function hrZonesToInputs(zones: HRZones): ZoneInputs[] {
+  return zones.map((z) => ({ min: String(z.min), max: String(z.max) }));
+}
 
 export default function KeyMetricsScreen() {
   const navigation = useNavigation();
@@ -105,8 +125,17 @@ export default function KeyMetricsScreen() {
   const [saving, setSaving] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
 
+  // HR zone state
+  const [hrZones, setHrZones] = useState<HRZones | null>(null);
+  const [showHRModal, setShowHRModal] = useState(false);
+  const [zoneInputs, setZoneInputs] = useState<ZoneInputs[]>(defaultZoneInputs());
+  const [hrSaveError, setHrSaveError] = useState<string | null>(null);
+
   useEffect(() => {
     fetchLatestEntry();
+    loadHRZones().then((z) => {
+      if (z) setHrZones(z);
+    });
   }, []);
 
   async function fetchLatestEntry() {
@@ -176,6 +205,44 @@ export default function KeyMetricsScreen() {
 
     setRaceEntry(data as RaceEntry);
     setShowModal(false);
+  }
+
+  // ── HR zone modal ──────────────────────────────────────────────────────────
+
+  function handleOpenHRModal() {
+    setZoneInputs(hrZones ? hrZonesToInputs(hrZones) : defaultZoneInputs());
+    setHrSaveError(null);
+    setShowHRModal(true);
+  }
+
+  function updateZoneInput(index: number, field: 'min' | 'max', value: string) {
+    setZoneInputs((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+    setHrSaveError(null);
+  }
+
+  async function handleSaveHRZones() {
+    const parsed: { min: number; max: number }[] = [];
+    for (let i = 0; i < 5; i++) {
+      const minVal = parseInt(zoneInputs[i].min, 10);
+      const maxVal = parseInt(zoneInputs[i].max, 10);
+      if (isNaN(minVal) || isNaN(maxVal)) {
+        setHrSaveError(`Zone ${i + 1}: enter valid BPM numbers.`);
+        return;
+      }
+      if (minVal >= maxVal) {
+        setHrSaveError(`Zone ${i + 1}: min must be less than max.`);
+        return;
+      }
+      parsed.push({ min: minVal, max: maxVal });
+    }
+    const zones = parsed as HRZones;
+    await saveHRZones(zones);
+    setHrZones(zones);
+    setShowHRModal(false);
   }
 
   const paces = raceEntry ? getTrainingPaces(raceEntry.vdot) : null;
@@ -322,19 +389,37 @@ export default function KeyMetricsScreen() {
           </Card>
 
           {/* HR Zones */}
-          <Card title="HR Zones" icon="heart-outline">
-            {[1, 2, 3, 4, 5].map((zone, i) => (
-              <MetricRow
-                key={zone}
-                label={`Zone ${zone}`}
-                value="— – — bpm"
-                accent={HR_ZONE_COLORS[zone - 1]}
-                isLast={i === 4}
-              />
-            ))}
-            <Text className="text-xs text-gray-400 mt-3">
-              Connect a heart rate monitor or enter your max HR to calculate zones.
-            </Text>
+          <Card
+            title="HR Zones"
+            icon="heart-outline"
+            action={
+              <TouchableOpacity
+                onPress={handleOpenHRModal}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ padding: 4 }}
+              >
+                <Ionicons name="pencil-outline" size={18} color="#2563eb" />
+              </TouchableOpacity>
+            }
+          >
+            {[1, 2, 3, 4, 5].map((zone, i) => {
+              const z = hrZones?.[i];
+              const value = z ? `${z.min} – ${z.max} bpm` : '— – — bpm';
+              return (
+                <MetricRow
+                  key={zone}
+                  label={`Zone ${zone}`}
+                  value={value}
+                  accent={z ? undefined : HR_ZONE_TEXT_CLASSES[i]}
+                  isLast={i === 4}
+                />
+              );
+            })}
+            {!hrZones && (
+              <Text className="text-xs text-gray-400 mt-3">
+                Tap the edit button to set your heart rate zones.
+              </Text>
+            )}
           </Card>
 
           {/* Lactate Threshold */}
@@ -358,7 +443,6 @@ export default function KeyMetricsScreen() {
         onRequestClose={handleCloseModal}
       >
         <View style={{ flex: 1, justifyContent: 'flex-end' }}>
-          {/* Backdrop — tap to dismiss */}
           <TouchableOpacity
             style={{
               position: 'absolute',
@@ -375,7 +459,6 @@ export default function KeyMetricsScreen() {
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
             <View className="bg-white rounded-t-3xl px-6 pt-5 pb-8">
 
-              {/* Header */}
               <View className="flex-row items-center justify-between mb-5">
                 <Text className="text-base font-semibold text-gray-800">Log Race Time</Text>
                 <TouchableOpacity
@@ -386,7 +469,6 @@ export default function KeyMetricsScreen() {
                 </TouchableOpacity>
               </View>
 
-              {/* Distance picker */}
               <Text className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
                 Race Distance
               </Text>
@@ -427,7 +509,6 @@ export default function KeyMetricsScreen() {
                 })}
               </ScrollView>
 
-              {/* Time input */}
               <Text className="text-xs font-semibold text-gray-500 uppercase tracking-wide mt-4 mb-2">
                 Finish Time
               </Text>
@@ -455,7 +536,6 @@ export default function KeyMetricsScreen() {
                 <Text className="text-red-500 text-xs mt-1.5">{inputError}</Text>
               )}
 
-              {/* Save button */}
               <TouchableOpacity
                 onPress={handleSave}
                 disabled={saving}
@@ -476,6 +556,164 @@ export default function KeyMetricsScreen() {
                 )}
               </TouchableOpacity>
 
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* HR Zone Edit Modal */}
+      <Modal
+        visible={showHRModal}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowHRModal(false)}
+      >
+        <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+          <TouchableOpacity
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0,0,0,0.4)',
+            }}
+            onPress={() => setShowHRModal(false)}
+            activeOpacity={1}
+          />
+
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+            <View
+              style={{
+                backgroundColor: 'white',
+                borderTopLeftRadius: 24,
+                borderTopRightRadius: 24,
+                paddingHorizontal: 24,
+                paddingTop: 20,
+                paddingBottom: 36,
+              }}
+            >
+              {/* Header */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                <Text style={{ fontSize: 16, fontWeight: '600', color: '#111827' }}>
+                  Edit HR Zones
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setShowHRModal(false)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="close-circle-outline" size={24} color="#9ca3af" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Column labels */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+                <View style={{ width: 64 }} />
+                <Text style={{ flex: 1, textAlign: 'center', fontSize: 11, color: '#9ca3af', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Min BPM
+                </Text>
+                <View style={{ width: 24 }} />
+                <Text style={{ flex: 1, textAlign: 'center', fontSize: 11, color: '#9ca3af', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  Max BPM
+                </Text>
+              </View>
+
+              {/* Zone rows */}
+              {[0, 1, 2, 3, 4].map((i) => (
+                <View
+                  key={i}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    marginBottom: 10,
+                  }}
+                >
+                  {/* Zone label */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', width: 64 }}>
+                    <View
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 5,
+                        backgroundColor: HR_ZONE_COLORS[i],
+                        marginRight: 6,
+                      }}
+                    />
+                    <Text style={{ fontSize: 13, fontWeight: '500', color: '#374151' }}>
+                      Zone {i + 1}
+                    </Text>
+                  </View>
+
+                  {/* Min input */}
+                  <TextInput
+                    value={zoneInputs[i].min}
+                    onChangeText={(v) => updateZoneInput(i, 'min', v)}
+                    keyboardType="number-pad"
+                    placeholder="—"
+                    placeholderTextColor="#d1d5db"
+                    style={{
+                      flex: 1,
+                      borderWidth: 1,
+                      borderColor: '#e5e7eb',
+                      borderRadius: 8,
+                      paddingHorizontal: 10,
+                      paddingVertical: 9,
+                      fontSize: 14,
+                      color: '#1f2937',
+                      backgroundColor: '#f9fafb',
+                      textAlign: 'center',
+                    }}
+                  />
+
+                  {/* Separator */}
+                  <Text style={{ width: 24, textAlign: 'center', color: '#9ca3af', fontSize: 16 }}>
+                    –
+                  </Text>
+
+                  {/* Max input */}
+                  <TextInput
+                    value={zoneInputs[i].max}
+                    onChangeText={(v) => updateZoneInput(i, 'max', v)}
+                    keyboardType="number-pad"
+                    placeholder="—"
+                    placeholderTextColor="#d1d5db"
+                    style={{
+                      flex: 1,
+                      borderWidth: 1,
+                      borderColor: '#e5e7eb',
+                      borderRadius: 8,
+                      paddingHorizontal: 10,
+                      paddingVertical: 9,
+                      fontSize: 14,
+                      color: '#1f2937',
+                      backgroundColor: '#f9fafb',
+                      textAlign: 'center',
+                    }}
+                  />
+                </View>
+              ))}
+
+              {hrSaveError && (
+                <Text style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>
+                  {hrSaveError}
+                </Text>
+              )}
+
+              {/* Save button */}
+              <TouchableOpacity
+                onPress={handleSaveHRZones}
+                style={{
+                  backgroundColor: '#2563eb',
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  alignItems: 'center',
+                  marginTop: 8,
+                }}
+              >
+                <Text style={{ color: 'white', fontWeight: '600', fontSize: 14 }}>
+                  Save Zones
+                </Text>
+              </TouchableOpacity>
             </View>
           </KeyboardAvoidingView>
         </View>

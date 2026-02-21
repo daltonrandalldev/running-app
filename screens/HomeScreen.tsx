@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -12,12 +12,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { BarChart } from 'react-native-chart-kit';
+import { useFocusEffect } from '@react-navigation/native';
 import type { BottomTabScreenProps } from '@react-navigation/bottom-tabs';
 import type { CompositeScreenProps } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList, MainTabParamList } from '../App';
 import { supabase } from '../lib/supabase';
+import { loadHRZones, getZoneForHR, type HRZones } from '../lib/hrZones';
 
 type Props = CompositeScreenProps<
   BottomTabScreenProps<MainTabParamList, 'Home'>,
@@ -37,7 +38,6 @@ type Activity = {
 };
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
-const CHART_WIDTH = SCREEN_WIDTH - 32;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -108,22 +108,33 @@ function activityTypeLabel(type: string | null): string {
   return type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
 }
 
-// ── Chart config ──────────────────────────────────────────────────────────────
-
-const CHART_CONFIG = {
-  backgroundGradientFrom: '#ffffff',
-  backgroundGradientTo: '#ffffff',
-  decimalPlaces: 0,
-  color: (opacity = 1) => `rgba(74, 144, 226, ${opacity})`,
-  labelColor: (opacity = 1) => `rgba(107, 114, 128, ${opacity})`,
-  propsForLabels: { fontSize: 10 },
-  barPercentage: 0.7,
-  propsForBackgroundLines: { strokeWidth: 0 },
-};
-
 // ── Chart components ──────────────────────────────────────────────────────────
 
+const BAR_COLOR = '#4a90e2';
+const BAR_MAX_HEIGHT = 150;
+const ZONE_BAR_MAX_HEIGHT = 120;
+
+function BarTooltip({ value, barHeight }: { value: string; barHeight: number }) {
+  return (
+    <View
+      style={{
+        position: 'absolute',
+        bottom: barHeight + 6,
+        left: -40,
+        right: -40,
+        alignItems: 'center',
+        zIndex: 20,
+      }}
+    >
+      <View style={{ backgroundColor: '#111827', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3 }}>
+        <Text style={{ color: 'white', fontSize: 10, fontWeight: '600' }}>{value}</Text>
+      </View>
+    </View>
+  );
+}
+
 function RunMileageChart({ activities }: { activities: Activity[] }) {
+  const [selected, setSelected] = useState<number | null>(null);
   const weeks = getLast10WeekStarts();
   const data = weeks.map((start) => {
     const end = weekEnd(start);
@@ -136,25 +147,42 @@ function RunMileageChart({ activities }: { activities: Activity[] }) {
       )
       .reduce((sum, a) => sum + kmToMiles(a.distance_km ?? 0), 0);
   });
+  const max = Math.max(...data, 1);
 
   return (
-    <BarChart
-      data={{ labels: weeks.map(weekLabel), datasets: [{ data }] }}
-      width={CHART_WIDTH}
-      height={200}
-      yAxisLabel=""
-      yAxisSuffix=""
-      chartConfig={CHART_CONFIG}
-      showValuesOnTopOfBars={false}
-      fromZero
-      withHorizontalLines={false}
-      withVerticalLines={false}
-      style={{ marginLeft: -16 }}
-    />
+    <View style={{ height: 200 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 4, height: BAR_MAX_HEIGHT, overflow: 'visible' }}>
+        {data.map((value, i) => {
+          const barHeight = value > 0 ? Math.max((value / max) * BAR_MAX_HEIGHT, 4) : 0;
+          const isSelected = selected === i;
+          return (
+            <TouchableOpacity
+              key={i}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: BAR_MAX_HEIGHT }}
+              onPress={() => setSelected(isSelected ? null : i)}
+              activeOpacity={0.7}
+            >
+              {isSelected && barHeight > 0 && (
+                <BarTooltip value={`${value.toFixed(1)} mi`} barHeight={barHeight} />
+              )}
+              <View style={{ width: '70%', height: barHeight, backgroundColor: BAR_COLOR, borderRadius: 3 }} />
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      <View style={{ flexDirection: 'row', paddingHorizontal: 4, paddingTop: 6 }}>
+        {weeks.map((w, i) => (
+          <Text key={i} style={{ flex: 1, textAlign: 'center', fontSize: 8, color: '#9ca3af' }}>
+            {weekLabel(w)}
+          </Text>
+        ))}
+      </View>
+    </View>
   );
 }
 
 function CyclingTimeChart({ activities }: { activities: Activity[] }) {
+  const [selected, setSelected] = useState<number | null>(null);
   const weeks = getLast10WeekStarts();
   const data = weeks.map((start) => {
     const end = weekEnd(start);
@@ -167,31 +195,191 @@ function CyclingTimeChart({ activities }: { activities: Activity[] }) {
       )
       .reduce((sum, a) => sum + secondsToHours(a.duration_seconds ?? 0), 0);
   });
+  const max = Math.max(...data, 1);
+
+  function formatHours(h: number) {
+    const hrs = Math.floor(h);
+    const mins = Math.round((h - hrs) * 60);
+    return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+  }
 
   return (
-    <BarChart
-      data={{ labels: weeks.map(weekLabel), datasets: [{ data }] }}
-      width={CHART_WIDTH}
-      height={200}
-      yAxisLabel=""
-      yAxisSuffix=""
-      chartConfig={CHART_CONFIG}
-      showValuesOnTopOfBars={false}
-      fromZero
-      withHorizontalLines={false}
-      withVerticalLines={false}
-      style={{ marginLeft: -16 }}
-    />
+    <View style={{ height: 200 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 4, height: BAR_MAX_HEIGHT, overflow: 'visible' }}>
+        {data.map((value, i) => {
+          const barHeight = value > 0 ? Math.max((value / max) * BAR_MAX_HEIGHT, 4) : 0;
+          const isSelected = selected === i;
+          return (
+            <TouchableOpacity
+              key={i}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: BAR_MAX_HEIGHT }}
+              onPress={() => setSelected(isSelected ? null : i)}
+              activeOpacity={0.7}
+            >
+              {isSelected && barHeight > 0 && (
+                <BarTooltip value={formatHours(value)} barHeight={barHeight} />
+              )}
+              <View style={{ width: '70%', height: barHeight, backgroundColor: BAR_COLOR, borderRadius: 3 }} />
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      <View style={{ flexDirection: 'row', paddingHorizontal: 4, paddingTop: 6 }}>
+        {weeks.map((w, i) => (
+          <Text key={i} style={{ flex: 1, textAlign: 'center', fontSize: 8, color: '#9ca3af' }}>
+            {weekLabel(w)}
+          </Text>
+        ))}
+      </View>
+    </View>
   );
 }
 
-function HRZoneChart() {
+const HR_ZONE_COLORS = ['#60a5fa', '#22c55e', '#eab308', '#f97316', '#ef4444'];
+
+type ZoneSelection = { weekIdx: number; zoneIdx: number } | null;
+
+function HRZoneChart({
+  activities,
+  hrZones,
+}: {
+  activities: Activity[];
+  hrZones: HRZones | null;
+}) {
+  const [selected, setSelected] = useState<ZoneSelection>(null);
+
+  if (!hrZones) {
+    return (
+      <View style={{ height: 200, alignItems: 'center', justifyContent: 'center' }}>
+        <Ionicons name="heart-outline" size={32} color="#d1d5db" />
+        <Text style={{ color: '#9ca3af', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
+          Set your HR zones in Key Metrics{'\n'}to see time in zone.
+        </Text>
+      </View>
+    );
+  }
+
+  const weeks = getLast10WeekStarts();
+
+  const weekData = weeks.map((start) => {
+    const end = weekEnd(start);
+    const zoneMins = [0, 0, 0, 0, 0];
+    for (const a of activities) {
+      if (a.avg_hr == null || a.duration_seconds == null) continue;
+      const t = new Date(a.start_time);
+      if (t < start || t >= end) continue;
+      const zone = getZoneForHR(a.avg_hr, hrZones);
+      if (zone != null) {
+        zoneMins[zone - 1] += a.duration_seconds / 60;
+      }
+    }
+    return zoneMins;
+  });
+
+  const weekTotals = weekData.map((z) => z.reduce((a, b) => a + b, 0));
+  const maxTotal = Math.max(...weekTotals, 1);
+  const hasAnyData = weekTotals.some((t) => t > 0);
+
+  function formatMins(mins: number) {
+    const h = Math.floor(mins / 60);
+    const m = Math.round(mins % 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
   return (
-    <View style={{ height: 200, alignItems: 'center', justifyContent: 'center' }}>
-      <Ionicons name="pulse-outline" size={32} color="#d1d5db" />
-      <Text style={{ color: '#9ca3af', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
-        HR Zone data not available.{'\n'}Add zone time columns to enable this chart.
-      </Text>
+    <View style={{ height: 200 }}>
+      {/* Legend */}
+      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 8 }}>
+        {HR_ZONE_COLORS.map((color, i) => (
+          <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <View style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: color }} />
+            <Text style={{ fontSize: 10, color: '#6b7280' }}>Z{i + 1}</Text>
+          </View>
+        ))}
+      </View>
+
+      {/* Bars */}
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 4, height: ZONE_BAR_MAX_HEIGHT, overflow: 'visible' }}>
+        {weekData.map((zoneMins, weekIdx) => {
+          const total = weekTotals[weekIdx];
+          const barHeight = total > 0 ? Math.max((total / maxTotal) * ZONE_BAR_MAX_HEIGHT, 4) : 0;
+          const selZone = selected?.weekIdx === weekIdx ? selected.zoneIdx : null;
+
+          return (
+            <View
+              key={weekIdx}
+              style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: ZONE_BAR_MAX_HEIGHT }}
+            >
+              {/* Tooltip — sits above the bar, outside overflow:hidden */}
+              {selZone !== null && barHeight > 0 && (
+                <View
+                  style={{
+                    position: 'absolute',
+                    bottom: barHeight + 6,
+                    left: -40,
+                    right: -40,
+                    alignItems: 'center',
+                    zIndex: 20,
+                  }}
+                >
+                  <View style={{ backgroundColor: '#111827', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 3 }}>
+                    <Text style={{ fontSize: 10, fontWeight: '600', color: HR_ZONE_COLORS[selZone] }}>
+                      Z{selZone + 1}: {formatMins(zoneMins[selZone])}
+                    </Text>
+                  </View>
+                </View>
+              )}
+
+              {/* Stacked bar — each segment is individually tappable */}
+              <View
+                style={{
+                  width: '70%',
+                  height: barHeight,
+                  flexDirection: 'column-reverse',
+                  overflow: 'hidden',
+                  borderRadius: 3,
+                }}
+              >
+                {zoneMins.map((mins, zoneIdx) => {
+                  if (mins === 0 || total === 0) return null;
+                  const isThisSeg = selZone === zoneIdx;
+                  const anySelInWeek = selZone !== null;
+                  return (
+                    <TouchableOpacity
+                      key={zoneIdx}
+                      activeOpacity={0.8}
+                      onPress={() =>
+                        setSelected(isThisSeg ? null : { weekIdx, zoneIdx })
+                      }
+                      style={{
+                        width: '100%',
+                        height: (mins / total) * barHeight,
+                        backgroundColor: HR_ZONE_COLORS[zoneIdx],
+                        opacity: anySelInWeek && !isThisSeg ? 0.35 : 1,
+                      }}
+                    />
+                  );
+                })}
+              </View>
+            </View>
+          );
+        })}
+      </View>
+
+      {/* Week labels */}
+      <View style={{ flexDirection: 'row', paddingHorizontal: 4, paddingTop: 5 }}>
+        {weeks.map((w, i) => (
+          <Text key={i} style={{ flex: 1, textAlign: 'center', fontSize: 8, color: '#9ca3af' }}>
+            {weekLabel(w)}
+          </Text>
+        ))}
+      </View>
+
+      {!hasAnyData && (
+        <Text style={{ textAlign: 'center', color: '#9ca3af', fontSize: 12, marginTop: 4 }}>
+          No HR data in the last 10 weeks.
+        </Text>
+      )}
     </View>
   );
 }
@@ -204,7 +392,7 @@ const CHART_CARDS = [
   { key: 'zones', title: 'Time in zone' },
 ];
 
-function ChartCarousel({ activities }: { activities: Activity[] }) {
+function ChartCarousel({ activities, hrZones }: { activities: Activity[]; hrZones: HRZones | null }) {
   const [activeIndex, setActiveIndex] = useState(0);
 
   function onScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
@@ -237,7 +425,7 @@ function ChartCarousel({ activities }: { activities: Activity[] }) {
             </Text>
             {item.key === 'run' && <RunMileageChart activities={activities} />}
             {item.key === 'cycle' && <CyclingTimeChart activities={activities} />}
-            {item.key === 'zones' && <HRZoneChart />}
+            {item.key === 'zones' && <HRZoneChart activities={activities} hrZones={hrZones} />}
           </View>
         )}
       />
@@ -339,6 +527,14 @@ export default function HomeScreen({ navigation }: Props) {
   const [recentActivities, setRecentActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('Activities');
+  const [hrZones, setHrZones] = useState<HRZones | null>(null);
+
+  // Reload HR zones whenever this screen comes into focus (e.g. after editing in Key Metrics)
+  useFocusEffect(
+    useCallback(() => {
+      loadHRZones().then((z) => setHrZones(z));
+    }, [])
+  );
 
   useEffect(() => {
     async function fetchData() {
@@ -468,7 +664,7 @@ export default function HomeScreen({ navigation }: Props) {
             <ActivityIndicator size="large" color="#4A90E2" />
           </View>
         ) : (
-          <ChartCarousel activities={activities} />
+          <ChartCarousel activities={activities} hrZones={hrZones} />
         )}
 
         {/* Section divider */}
