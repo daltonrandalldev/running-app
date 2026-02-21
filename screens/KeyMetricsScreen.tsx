@@ -417,6 +417,50 @@ export default function KeyMetricsScreen() {
             )}
           </Card>
 
+          {/* Sweet Spot Interval Guidelines */}
+          <Card title="Sweet Spot Interval Guidelines" icon="timer-outline">
+            {loading ? (
+              <View className="py-4 items-center">
+                <ActivityIndicator color="#2563eb" />
+              </View>
+            ) : raceEntry ? (
+              <>
+                {(() => {
+                  const v = raceEntry.vdot;
+                  const pace12k = predictedPaceMile(12000, predictTime(12000, v));
+                  const pace15k = predictedPaceMile(15000, predictTime(15000, v));
+                  const pace20k = predictedPaceMile(20000, predictTime(20000, v));
+                  const pace25k = predictedPaceMile(25000, predictTime(25000, v));
+                  const pace30k = predictedPaceMile(30000, predictTime(30000, v));
+                  return (
+                    <>
+                      <MetricRow
+                        label="3 Min Reps  (12k–15k effort)"
+                        value={`${pace12k} – ${pace15k}`}
+                        accent="text-gray-800"
+                      />
+                      <MetricRow
+                        label="6 Min Reps  (20k effort)"
+                        value={pace20k}
+                        accent="text-gray-800"
+                      />
+                      <MetricRow
+                        label="10 Min Reps  (25k–30k effort)"
+                        value={`${pace25k} – ${pace30k}`}
+                        accent="text-gray-800"
+                        isLast
+                      />
+                    </>
+                  );
+                })()}
+              </>
+            ) : (
+              <Text className="text-xs text-gray-400 mt-1 mb-1">
+                Log a race to see your sweet spot interval paces.
+              </Text>
+            )}
+          </Card>
+
           {/* HR Zones */}
           <Card
             title="HR Zones"
