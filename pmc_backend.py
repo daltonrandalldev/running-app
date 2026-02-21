@@ -201,17 +201,17 @@ def determine_active_load(
 ) -> Optional[float]:
     """
     Priority (highest to lowest):
-      1. Running + elevation → pace_load_gap
-      2. Running             → pace_load_flat
-      3. Any activity with HR → hr_tss
+      1. Any activity with HR → hr_tss
+      2. Running + elevation  → pace_load_gap  (fallback when no HR)
+      3. Running              → pace_load_flat (fallback when no HR)
       4. Otherwise            → None (NULL in DB)
     """
+    if hr_tss_score is not None and hr_tss_score > 0:
+        return hr_tss_score
     if is_run and has_elevation and pace_load_gap is not None:
         return pace_load_gap
     if is_run and pace_load_flat is not None:
         return pace_load_flat
-    if hr_tss_score is not None and hr_tss_score > 0:
-        return hr_tss_score
     return None
 
 
