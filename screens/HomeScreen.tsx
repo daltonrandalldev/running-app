@@ -707,7 +707,6 @@ export default function HomeScreen({ navigation }: Props) {
 
       if (chartRes.data) setActivities(chartRes.data);
       if (recentRes.data) setRecentActivities(recentRes.data);
-      console.log('[PMC] rows:', pmcRes.data?.length, 'error:', pmcRes.error?.message);
       if (pmcRes.data) setPmcData([...pmcRes.data].reverse());
       setLoading(false);
     }
@@ -817,16 +816,10 @@ export default function HomeScreen({ navigation }: Props) {
         )}
 
         {/* PMC Chart */}
-        {!loading && (
+        {!loading && pmcData.length > 0 && (
           <View>
             <View style={{ height: 1, backgroundColor: '#f3f4f6', marginTop: 4 }} />
-            {pmcData.length > 0 ? (
-              <PMCChart data={pmcData} />
-            ) : (
-              <View style={{ padding: 16, alignItems: 'center' }}>
-                <Text style={{ color: '#9ca3af', fontSize: 13 }}>PMC: no data ({pmcData.length} rows)</Text>
-              </View>
-            )}
+            <PMCChart data={pmcData} />
           </View>
         )}
 
