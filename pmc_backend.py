@@ -503,6 +503,11 @@ def main() -> None:
                 print(f"  Form    (TSB)         : {latest['tsb']:.1f}")
                 print(f"\n✓ Pipeline complete — transaction committed")
 
+                # ── 9. Notify PostgREST to reload schema cache ─────────────────
+                # Picks up any new GRANTs so the Supabase JS client can immediately
+                # read pmc_daily and lthr_settings without waiting for auto-reload.
+                cur.execute("NOTIFY pgrst, 'reload schema'")
+
     except Exception as exc:
         print(f"\n✗ Pipeline failed — transaction rolled back")
         print(f"  {type(exc).__name__}: {exc}")

@@ -26,6 +26,8 @@ type Props = CompositeScreenProps<
   NativeStackScreenProps<RootStackParamList>
 >;
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+
 type PMCDay = {
   date: string;
   ctl: number;
@@ -175,8 +177,6 @@ type Activity = {
   active_load: number | null;
   hr_tss: number | null;
 };
-
-const SCREEN_WIDTH = Dimensions.get('window').width;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
