@@ -101,6 +101,9 @@ MIGRATIONS = [
     # Grant SELECT to anon + authenticated so the Supabase JS client can read these tables
     "GRANT SELECT ON pmc_daily    TO anon, authenticated",
     "GRANT SELECT ON lthr_settings TO anon, authenticated",
+    # Disable RLS — no auth yet, consistent with existing tables in this project
+    "ALTER TABLE pmc_daily     DISABLE ROW LEVEL SECURITY",
+    "ALTER TABLE lthr_settings DISABLE ROW LEVEL SECURITY",
 ]
 
 # ─── MATH ─────────────────────────────────────────────────────────────────────
