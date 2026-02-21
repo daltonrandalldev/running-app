@@ -10,16 +10,17 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { BarChart } from 'react-native-chart-kit';
-import type { DrawerScreenProps } from '@react-navigation/drawer';
+import type { BottomTabScreenProps } from '@react-navigation/bottom-tabs';
 import type { CompositeScreenProps } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import type { RootStackParamList } from '../App';
+import type { RootStackParamList, MainTabParamList } from '../App';
 import { supabase } from '../lib/supabase';
 
 type Props = CompositeScreenProps<
-  DrawerScreenProps<any, 'Home'>,
+  BottomTabScreenProps<MainTabParamList, 'Home'>,
   NativeStackScreenProps<RootStackParamList>
 >;
 
@@ -36,8 +37,9 @@ type Activity = {
 };
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
-const CHART_WIDTH = SCREEN_WIDTH - 32; // 16px padding each side
+const CHART_WIDTH = SCREEN_WIDTH - 32;
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getLast10WeekStarts(): Date[] {
   const now = new Date();
@@ -72,12 +74,12 @@ function secondsToHours(s: number) {
   return s / 3600;
 }
 
+// Always HH:MM:SS
 function formatDuration(seconds: number) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function formatPace(minPerKm: number) {
@@ -96,18 +98,31 @@ function isCyclingActivity(type: string | null) {
   return t.includes('cycl') || t.includes('bike') || t.includes('ride');
 }
 
-const CHART_CONFIG_BASE = {
+function activityTypeLabel(type: string | null): string {
+  if (!type) return 'Activity';
+  const t = type.toLowerCase();
+  if (t === 'trail_run' || t === 'trailrun' || t === 'trail run') return 'Trail run';
+  if (t.includes('run')) return 'Run';
+  if (t === 'virtual_ride' || t === 'indoor_cycling' || t === 'virtualride') return 'Indoor cycling';
+  if (t.includes('cycl') || t.includes('bike') || t.includes('ride')) return 'Cycling';
+  return type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+}
+
+// ── Chart config ──────────────────────────────────────────────────────────────
+
+const CHART_CONFIG = {
   backgroundGradientFrom: '#ffffff',
   backgroundGradientTo: '#ffffff',
-  decimalPlaces: 1,
-  color: (opacity = 1) => `rgba(0,0,0,${opacity})`,
-  labelColor: (opacity = 1) => `rgba(107,114,128,${opacity})`,
-  style: { borderRadius: 12 },
-  propsForLabels: { fontSize: 9 },
-  barPercentage: 0.6,
+  decimalPlaces: 0,
+  color: (opacity = 1) => `rgba(74, 144, 226, ${opacity})`,
+  labelColor: (opacity = 1) => `rgba(107, 114, 128, ${opacity})`,
+  propsForLabels: { fontSize: 10 },
+  barPercentage: 0.7,
+  propsForBackgroundLines: { strokeWidth: 0 },
 };
 
-// --- Chart 1: Weekly Running Mileage ---
+// ── Chart components ──────────────────────────────────────────────────────────
+
 function RunMileageChart({ activities }: { activities: Activity[] }) {
   const weeks = getLast10WeekStarts();
   const data = weeks.map((start) => {
@@ -123,29 +138,22 @@ function RunMileageChart({ activities }: { activities: Activity[] }) {
   });
 
   return (
-    <View>
-      <BarChart
-        data={{
-          labels: weeks.map(weekLabel),
-          datasets: [{ data }],
-        }}
-        width={CHART_WIDTH}
-        height={200}
-        yAxisLabel=""
-        yAxisSuffix=" mi"
-        chartConfig={{
-          ...CHART_CONFIG_BASE,
-          color: (opacity = 1) => `rgba(16,185,129,${opacity})`,
-        }}
-        style={{ borderRadius: 12 }}
-        showValuesOnTopOfBars={false}
-        fromZero
-      />
-    </View>
+    <BarChart
+      data={{ labels: weeks.map(weekLabel), datasets: [{ data }] }}
+      width={CHART_WIDTH}
+      height={200}
+      yAxisLabel=""
+      yAxisSuffix=""
+      chartConfig={CHART_CONFIG}
+      showValuesOnTopOfBars={false}
+      fromZero
+      withHorizontalLines={false}
+      withVerticalLines={false}
+      style={{ marginLeft: -16 }}
+    />
   );
 }
 
-// --- Chart 2: Weekly Cycling Time ---
 function CyclingTimeChart({ activities }: { activities: Activity[] }) {
   const weeks = getLast10WeekStarts();
   const data = weeks.map((start) => {
@@ -161,46 +169,39 @@ function CyclingTimeChart({ activities }: { activities: Activity[] }) {
   });
 
   return (
-    <View>
-      <BarChart
-        data={{
-          labels: weeks.map(weekLabel),
-          datasets: [{ data }],
-        }}
-        width={CHART_WIDTH}
-        height={200}
-        yAxisLabel=""
-        yAxisSuffix=" h"
-        chartConfig={{
-          ...CHART_CONFIG_BASE,
-          color: (opacity = 1) => `rgba(249,115,22,${opacity})`,
-        }}
-        style={{ borderRadius: 12 }}
-        showValuesOnTopOfBars={false}
-        fromZero
-      />
-    </View>
+    <BarChart
+      data={{ labels: weeks.map(weekLabel), datasets: [{ data }] }}
+      width={CHART_WIDTH}
+      height={200}
+      yAxisLabel=""
+      yAxisSuffix=""
+      chartConfig={CHART_CONFIG}
+      showValuesOnTopOfBars={false}
+      fromZero
+      withHorizontalLines={false}
+      withVerticalLines={false}
+      style={{ marginLeft: -16 }}
+    />
   );
 }
 
-// --- Chart 3: Weekly HR Zone Time (placeholder — no zone data in DB yet) ---
-function HRZoneChart({ activities: _activities }: { activities: Activity[] }) {
+function HRZoneChart() {
   return (
-    <View className="h-48 items-center justify-center gap-2">
+    <View style={{ height: 200, alignItems: 'center', justifyContent: 'center' }}>
       <Ionicons name="pulse-outline" size={32} color="#d1d5db" />
-      <Text className="text-sm text-gray-400 text-center">
+      <Text style={{ color: '#9ca3af', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
         HR Zone data not available.{'\n'}Add zone time columns to enable this chart.
       </Text>
     </View>
   );
 }
 
+// ── Chart Carousel ────────────────────────────────────────────────────────────
 
-// --- Chart Carousel ---
 const CHART_CARDS = [
-  { key: 'run', title: 'Weekly Running Mileage', subtitle: 'Miles per week' },
-  { key: 'cycle', title: 'Weekly Cycling Time', subtitle: 'Hours per week' },
-  { key: 'zones', title: 'Training Time by HR Zone', subtitle: 'Hours per zone' },
+  { key: 'run', title: 'Weekly mileage' },
+  { key: 'cycle', title: 'Weekly cycling time' },
+  { key: 'zones', title: 'Time in zone' },
 ];
 
 function ChartCarousel({ activities }: { activities: Activity[] }) {
@@ -212,7 +213,7 @@ function ChartCarousel({ activities }: { activities: Activity[] }) {
   }
 
   return (
-    <View className="mb-6">
+    <View style={{ paddingTop: 20, paddingBottom: 16 }}>
       <FlatList
         data={CHART_CARDS}
         horizontal
@@ -223,26 +224,33 @@ function ChartCarousel({ activities }: { activities: Activity[] }) {
         scrollEventThrottle={16}
         renderItem={({ item }) => (
           <View style={{ width: SCREEN_WIDTH, paddingHorizontal: 16 }}>
-            <View className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm">
-              <Text className="text-sm font-semibold text-gray-800 mb-0.5">{item.title}</Text>
-              <Text className="text-xs text-gray-400 mb-3">{item.subtitle}</Text>
-              {item.key === 'run' && <RunMileageChart activities={activities} />}
-              {item.key === 'cycle' && <CyclingTimeChart activities={activities} />}
-              {item.key === 'zones' && <HRZoneChart activities={activities} />}
-            </View>
+            <Text
+              style={{
+                fontSize: 17,
+                fontWeight: '700',
+                textAlign: 'center',
+                marginBottom: 14,
+                color: '#111827',
+              }}
+            >
+              {item.title}
+            </Text>
+            {item.key === 'run' && <RunMileageChart activities={activities} />}
+            {item.key === 'cycle' && <CyclingTimeChart activities={activities} />}
+            {item.key === 'zones' && <HRZoneChart />}
           </View>
         )}
       />
       {/* Pagination dots */}
-      <View className="flex-row justify-center gap-1.5 mt-3">
+      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 6, marginTop: 14 }}>
         {CHART_CARDS.map((_, i) => (
           <View
             key={i}
-            className="rounded-full"
             style={{
-              width: i === activeIndex ? 16 : 6,
-              height: 6,
-              backgroundColor: i === activeIndex ? '#10b981' : '#d1d5db',
+              width: 7,
+              height: 7,
+              borderRadius: 4,
+              backgroundColor: i === activeIndex ? '#111827' : '#d1d5db',
             }}
           />
         ))}
@@ -251,90 +259,86 @@ function ChartCarousel({ activities }: { activities: Activity[] }) {
   );
 }
 
-// --- Activity Card ---
-function ActivityCard({
+// ── Activity Row ──────────────────────────────────────────────────────────────
+
+function ActivityRow({
   activity,
   onPress,
 }: {
   activity: Activity;
   onPress: () => void;
 }) {
-  const running = isRunActivity(activity.activity_type);
-  const borderColor = running ? '#10b981' : '#f97316';
-  const iconName = running ? 'footsteps-outline' : 'bicycle-outline';
+  const isRun = isRunActivity(activity.activity_type);
 
   return (
-    <TouchableOpacity
-      onPress={onPress}
-      activeOpacity={0.75}
-      className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden mb-3"
-    >
-      {/* Colored left border strip */}
-      <View className="flex-row">
-        <View style={{ width: 4, backgroundColor: borderColor }} />
-        <View className="flex-1 p-4">
-          {/* Top row: icon + name + date */}
-          <View className="flex-row items-center mb-2">
-            <Ionicons name={iconName as any} size={18} color={borderColor} />
-            <Text className="flex-1 text-sm font-semibold text-gray-800 ml-2" numberOfLines={1}>
-              {activity.name || (running ? 'Run' : 'Ride')}
-            </Text>
-            {activity.is_pr && (
-              <View className="bg-yellow-50 border border-yellow-300 rounded-full px-2 py-0.5 ml-2">
-                <Text className="text-xs font-bold text-yellow-700">PR</Text>
-              </View>
-            )}
-          </View>
-
-          {/* Date */}
-          <Text className="text-xs text-gray-400 mb-3">
-            {new Date(activity.start_time).toLocaleString('en-US', {
-              weekday: 'short',
-              month: 'short',
-              day: 'numeric',
-              hour: 'numeric',
-              minute: '2-digit',
-            })}
-          </Text>
-
-          {/* Stats row */}
-          <View className="flex-row flex-wrap gap-x-4 gap-y-1">
-            {activity.distance_km != null && (
-              <StatPill
-                value={`${kmToMiles(activity.distance_km).toFixed(2)} mi`}
-                icon="map-outline"
-              />
-            )}
-            {activity.duration_seconds != null && (
-              <StatPill value={formatDuration(activity.duration_seconds)} icon="time-outline" />
-            )}
-            {activity.avg_pace_min_per_km != null && running && (
-              <StatPill value={`${formatPace(activity.avg_pace_min_per_km)} /mi`} icon="speedometer-outline" />
-            )}
-            {activity.avg_hr != null && (
-              <StatPill value={`${activity.avg_hr} bpm`} icon="heart-outline" />
-            )}
-          </View>
+    <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'flex-start',
+          paddingHorizontal: 16,
+          paddingVertical: 14,
+        }}
+      >
+        {/* TSS tile — placeholder until tss column is added */}
+        <View
+          style={{
+            width: 64,
+            height: 64,
+            backgroundColor: '#E8F0FE',
+            borderRadius: 10,
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginRight: 14,
+          }}
+        >
+          <Text style={{ fontSize: 26, fontWeight: '600', color: '#1a1a1a' }}>--</Text>
         </View>
+
+        {/* Description */}
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 13, color: '#9ca3af', marginBottom: 3 }}>
+            {activityTypeLabel(activity.activity_type)}
+          </Text>
+          {activity.distance_km != null && (
+            <Text style={{ fontSize: 14, color: '#111827' }}>
+              {kmToMiles(activity.distance_km).toFixed(1)} mi
+            </Text>
+          )}
+          {activity.avg_pace_min_per_km != null && isRun && (
+            <Text style={{ fontSize: 14, color: '#111827' }}>
+              Avg pace: {formatPace(activity.avg_pace_min_per_km)}
+            </Text>
+          )}
+          {activity.avg_hr != null && (
+            <Text style={{ fontSize: 14, color: '#111827' }}>Avg HR: {activity.avg_hr}</Text>
+          )}
+        </View>
+
+        {/* Duration */}
+        <Text style={{ fontSize: 14, color: '#111827', paddingTop: 22 }}>
+          {activity.duration_seconds ? formatDuration(activity.duration_seconds) : '--'}
+        </Text>
       </View>
     </TouchableOpacity>
   );
 }
 
-function StatPill({ value, icon }: { value: string; icon: string }) {
-  return (
-    <View className="flex-row items-center gap-0.5">
-      <Ionicons name={icon as any} size={11} color="#9ca3af" />
-      <Text className="text-xs text-gray-600">{value}</Text>
-    </View>
-  );
-}
+// ── Pill tabs ─────────────────────────────────────────────────────────────────
 
-// --- Main HomeScreen ---
+const PILL_TABS = [
+  { label: 'Key metrics', icon: 'document-text-outline' as const },
+  { label: 'Activities', icon: 'time-outline' as const },
+  { label: 'Training score', icon: 'notifications-outline' as const },
+];
+
+// ── HomeScreen ────────────────────────────────────────────────────────────────
+
 export default function HomeScreen({ navigation }: Props) {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [recentActivities, setRecentActivities] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('Activities');
 
   useEffect(() => {
     async function fetchData() {
@@ -355,7 +359,7 @@ export default function HomeScreen({ navigation }: Props) {
             'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr'
           )
           .order('start_time', { ascending: false })
-          .limit(3),
+          .limit(10),
       ]);
 
       if (chartRes.data) setActivities(chartRes.data);
@@ -367,42 +371,162 @@ export default function HomeScreen({ navigation }: Props) {
   }, []);
 
   return (
-    <ScrollView className="flex-1 bg-gray-50" showsVerticalScrollIndicator={false}>
-      <View className="pt-5 pb-12">
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#ffffff' }}>
+      {/* Header */}
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: 16,
+          paddingVertical: 12,
+        }}
+      >
+        <TouchableOpacity style={{ padding: 4 }}>
+          <Ionicons name="menu" size={24} color="#111827" />
+        </TouchableOpacity>
+        <Text
+          style={{
+            flex: 1,
+            textAlign: 'center',
+            fontSize: 18,
+            fontWeight: '700',
+            color: '#111827',
+          }}
+        >
+          Trainer
+        </Text>
+        <View
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 18,
+            backgroundColor: '#e5e7eb',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Ionicons name="person" size={20} color="#6b7280" />
+        </View>
+      </View>
 
-        {/* Chart Carousel */}
+      {/* Pill tabs */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={{ height: 52 }}
+        contentContainerStyle={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: 16,
+          height: 52,
+        }}
+      >
+        {PILL_TABS.map((tab, index) => {
+          const isActive = tab.label === activeTab;
+          return (
+            <TouchableOpacity
+              key={tab.label}
+              onPress={() => {
+                if (tab.label === 'Key metrics') {
+                  navigation.navigate('KeyMetrics');
+                } else {
+                  setActiveTab(tab.label);
+                }
+              }}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                height: 36,
+                paddingHorizontal: 14,
+                borderRadius: 18,
+                borderWidth: 1,
+                borderColor: isActive ? '#111827' : '#d1d5db',
+                marginRight: index < PILL_TABS.length - 1 ? 8 : 0,
+              }}
+            >
+              <Ionicons
+                name={tab.icon}
+                size={15}
+                color={isActive ? '#111827' : '#9ca3af'}
+                style={{ marginRight: 6 }}
+              />
+              <Text style={{ fontSize: 14, lineHeight: 36, color: isActive ? '#111827' : '#6b7280' }}>
+                {tab.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      {/* Top divider */}
+      <View style={{ height: 1, backgroundColor: '#f3f4f6' }} />
+
+      <ScrollView showsVerticalScrollIndicator={false}>
+        {/* Charts */}
         {loading ? (
-          <View className="mx-4 bg-white rounded-2xl border border-gray-100 h-64 items-center justify-center mb-6">
-            <ActivityIndicator size="large" color="#10b981" />
-            <Text className="text-xs text-gray-400 mt-3">Loading charts…</Text>
+          <View style={{ height: 260, alignItems: 'center', justifyContent: 'center' }}>
+            <ActivityIndicator size="large" color="#4A90E2" />
           </View>
         ) : (
           <ChartCarousel activities={activities} />
         )}
 
-        {/* Recent Activities */}
-        <View className="px-4">
-          <Text className="text-base font-semibold text-gray-800 mb-3">Recent Activities</Text>
+        {/* Section divider */}
+        <View style={{ height: 1, backgroundColor: '#f3f4f6', marginTop: 4 }} />
 
-          {loading ? (
-            <ActivityIndicator size="large" color="#10b981" />
-          ) : recentActivities.length === 0 ? (
-            <View className="bg-white rounded-xl p-6 border border-gray-100 items-center">
-              <Ionicons name="walk-outline" size={36} color="#d1d5db" />
-              <Text className="text-gray-400 mt-2 text-sm">No activities logged yet</Text>
-            </View>
-          ) : (
-            recentActivities.map((a) => (
-              <ActivityCard
-                key={a.id}
-                activity={a}
-                onPress={() => navigation.navigate('ActivityDetail', { activityId: a.id })}
-              />
-            ))
-          )}
+        {/* Activities heading */}
+        <Text
+          style={{
+            fontSize: 34,
+            fontWeight: '700',
+            textAlign: 'center',
+            marginTop: 20,
+            marginBottom: 12,
+            color: '#111827',
+          }}
+        >
+          Activities
+        </Text>
+
+        {/* Column headers */}
+        <View
+          style={{
+            flexDirection: 'row',
+            paddingHorizontal: 16,
+            paddingBottom: 8,
+          }}
+        >
+          <Text style={{ width: 78, fontSize: 13, color: '#6b7280' }}>TSS</Text>
+          <Text style={{ flex: 1, fontSize: 13, color: '#6b7280' }}>Description</Text>
+          <Text style={{ fontSize: 13, color: '#6b7280' }}>Time</Text>
         </View>
 
-      </View>
-    </ScrollView>
+        {/* Activity rows */}
+        {loading ? (
+          <ActivityIndicator
+            size="large"
+            color="#4A90E2"
+            style={{ marginTop: 24 }}
+          />
+        ) : recentActivities.length === 0 ? (
+          <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+            <Ionicons name="walk-outline" size={36} color="#d1d5db" />
+            <Text style={{ color: '#9ca3af', marginTop: 8, fontSize: 14 }}>
+              No activities logged yet
+            </Text>
+          </View>
+        ) : (
+          recentActivities.map((a) => (
+            <ActivityRow
+              key={a.id}
+              activity={a}
+              onPress={() => navigation.navigate('ActivityDetail', { activityId: a.id })}
+            />
+          ))
+        )}
+
+        <View style={{ height: 32 }} />
+      </ScrollView>
+    </SafeAreaView>
   );
 }

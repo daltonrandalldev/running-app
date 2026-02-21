@@ -10,6 +10,8 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 import {
@@ -94,6 +96,7 @@ const HR_ZONE_COLORS = [
 ];
 
 export default function KeyMetricsScreen() {
+  const navigation = useNavigation();
   const [loading, setLoading] = useState(true);
   const [raceEntry, setRaceEntry] = useState<RaceEntry | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -179,8 +182,29 @@ export default function KeyMetricsScreen() {
 
   return (
     <>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#f9fafb' }}>
+      {/* Back header */}
+      {navigation.canGoBack() && (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingHorizontal: 8,
+            paddingTop: 4,
+            paddingBottom: 4,
+          }}
+        >
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={{ padding: 8 }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="chevron-back" size={26} color="#111827" />
+          </TouchableOpacity>
+        </View>
+      )}
       <ScrollView className="flex-1 bg-gray-50">
-        <View className="px-5 pt-6 pb-10">
+        <View className="px-5 pt-8 pb-10">
 
           {/* VDOT Score */}
           <Card title="VDOT Score" icon="speedometer-outline">
@@ -324,6 +348,7 @@ export default function KeyMetricsScreen() {
 
         </View>
       </ScrollView>
+      </SafeAreaView>
 
       {/* Race Entry Modal */}
       <Modal
