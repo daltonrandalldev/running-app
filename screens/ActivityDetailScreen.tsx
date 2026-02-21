@@ -34,6 +34,11 @@ type ActivityDetail = {
   start_longitude: number | null;
   is_pr: boolean | null;
   is_favorite: boolean | null;
+  active_load: number | null;
+  hr_tss: number | null;
+  trimp: number | null;
+  pace_load_flat: number | null;
+  pace_load_gap: number | null;
 };
 
 function formatDuration(seconds: number) {
@@ -208,6 +213,32 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           <StatCard label="Avg HR" value={activity.avg_hr ? `${activity.avg_hr} bpm` : null} />
           <StatCard label="Max HR" value={activity.max_hr ? `${activity.max_hr} bpm` : null} />
         </Section>
+
+        {/* Training Load */}
+        {(activity.active_load != null || activity.hr_tss != null || activity.trimp != null) && (
+          <Section title="Training Load">
+            <StatCard
+              label="Load (PMC)"
+              value={activity.active_load != null ? activity.active_load.toFixed(1) : null}
+            />
+            <StatCard
+              label="hrTSS"
+              value={activity.hr_tss != null ? activity.hr_tss.toFixed(1) : null}
+            />
+            <StatCard
+              label="TRIMP"
+              value={activity.trimp != null ? activity.trimp.toFixed(1) : null}
+            />
+            <StatCard
+              label="Pace Load (GAP)"
+              value={activity.pace_load_gap != null ? activity.pace_load_gap.toFixed(1) : null}
+            />
+            <StatCard
+              label="Pace Load (Flat)"
+              value={activity.pace_load_flat != null ? activity.pace_load_flat.toFixed(1) : null}
+            />
+          </Section>
+        )}
 
         {/* Elevation */}
         <Section title="Elevation">

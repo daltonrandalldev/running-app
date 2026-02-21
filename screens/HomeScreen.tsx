@@ -35,6 +35,7 @@ type Activity = {
   avg_pace_min_per_km: number | null;
   avg_hr: number | null;
   is_pr: boolean | null;
+  active_load: number | null;
 };
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -468,7 +469,7 @@ function ActivityRow({
           paddingVertical: 14,
         }}
       >
-        {/* TSS tile — placeholder until tss column is added */}
+        {/* TSS tile */}
         <View
           style={{
             width: 64,
@@ -480,7 +481,9 @@ function ActivityRow({
             marginRight: 14,
           }}
         >
-          <Text style={{ fontSize: 26, fontWeight: '600', color: '#1a1a1a' }}>--</Text>
+          <Text style={{ fontSize: 26, fontWeight: '600', color: '#1a1a1a' }}>
+            {activity.active_load != null ? Math.round(activity.active_load) : '--'}
+          </Text>
         </View>
 
         {/* Description */}
@@ -545,14 +548,14 @@ export default function HomeScreen({ navigation }: Props) {
         supabase
           .from('activities')
           .select(
-            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr'
+            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr, active_load'
           )
           .gte('start_time', tenWeeksAgo.toISOString())
           .order('start_time', { ascending: true }),
         supabase
           .from('activities')
           .select(
-            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr'
+            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr, active_load'
           )
           .order('start_time', { ascending: false })
           .limit(10),
