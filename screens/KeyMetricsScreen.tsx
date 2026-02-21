@@ -15,6 +15,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 import { loadHRZones, saveHRZones, type HRZones } from '../lib/hrZones';
+import { loadLTHR, saveLTHR } from '../lib/lthr';
 import {
   calculateVdot,
   predictTime,
@@ -131,10 +132,19 @@ export default function KeyMetricsScreen() {
   const [zoneInputs, setZoneInputs] = useState<ZoneInputs[]>(defaultZoneInputs());
   const [hrSaveError, setHrSaveError] = useState<string | null>(null);
 
+  // LTHR state
+  const [lthr, setLthr] = useState<number | null>(null);
+  const [showLTHRModal, setShowLTHRModal] = useState(false);
+  const [lthrInput, setLthrInput] = useState('');
+  const [lthrSaveError, setLthrSaveError] = useState<string | null>(null);
+
   useEffect(() => {
     fetchLatestEntry();
     loadHRZones().then((z) => {
       if (z) setHrZones(z);
+    });
+    loadLTHR().then((v) => {
+      if (v !== null) setLthr(v);
     });
   }, []);
 
@@ -243,6 +253,25 @@ export default function KeyMetricsScreen() {
     await saveHRZones(zones);
     setHrZones(zones);
     setShowHRModal(false);
+  }
+
+  // ── LTHR modal ──────────────────────────────────────────────────────────────
+
+  function handleOpenLTHRModal() {
+    setLthrInput(lthr !== null ? String(lthr) : '');
+    setLthrSaveError(null);
+    setShowLTHRModal(true);
+  }
+
+  async function handleSaveLTHR() {
+    const val = parseInt(lthrInput, 10);
+    if (isNaN(val) || val < 60 || val > 220) {
+      setLthrSaveError('Enter a valid heart rate (60–220 bpm).');
+      return;
+    }
+    await saveLTHR(val);
+    setLthr(val);
+    setShowLTHRModal(false);
   }
 
   const paces = raceEntry ? getTrainingPaces(raceEntry.vdot) : null;
@@ -423,12 +452,30 @@ export default function KeyMetricsScreen() {
           </Card>
 
           {/* Lactate Threshold */}
-          <Card title="Lactate Threshold" icon="pulse-outline">
-            <MetricRow label="Threshold Heart Rate" value="— bpm" />
-            <MetricRow label="Threshold Pace" value="—:—/mi" isLast />
-            <Text className="text-xs text-gray-400 mt-3">
-              Estimated from recent race performances or workout data.
-            </Text>
+          <Card
+            title="Lactate Threshold"
+            icon="pulse-outline"
+            action={
+              <TouchableOpacity
+                onPress={handleOpenLTHRModal}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ padding: 4 }}
+              >
+                <Ionicons name="pencil-outline" size={18} color="#2563eb" />
+              </TouchableOpacity>
+            }
+          >
+            <MetricRow
+              label="Threshold Heart Rate"
+              value={lthr !== null ? `${lthr} bpm` : '— bpm'}
+              accent={lthr !== null ? 'text-gray-800' : undefined}
+              isLast
+            />
+            {!lthr && (
+              <Text className="text-xs text-gray-400 mt-3">
+                Tap the edit button to set your lactate threshold heart rate.
+              </Text>
+            )}
           </Card>
 
         </View>
@@ -556,6 +603,98 @@ export default function KeyMetricsScreen() {
                 )}
               </TouchableOpacity>
 
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* LTHR Edit Modal */}
+      <Modal
+        visible={showLTHRModal}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowLTHRModal(false)}
+      >
+        <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+          <TouchableOpacity
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0,0,0,0.4)',
+            }}
+            onPress={() => setShowLTHRModal(false)}
+            activeOpacity={1}
+          />
+
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+            <View
+              style={{
+                backgroundColor: 'white',
+                borderTopLeftRadius: 24,
+                borderTopRightRadius: 24,
+                paddingHorizontal: 24,
+                paddingTop: 20,
+                paddingBottom: 36,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                <Text style={{ fontSize: 16, fontWeight: '600', color: '#111827' }}>
+                  Edit LTHR
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setShowLTHRModal(false)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="close-circle-outline" size={24} color="#9ca3af" />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={{ fontSize: 11, color: '#9ca3af', fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                Threshold Heart Rate (BPM)
+              </Text>
+              <TextInput
+                value={lthrInput}
+                onChangeText={(v) => {
+                  setLthrInput(v);
+                  setLthrSaveError(null);
+                }}
+                keyboardType="number-pad"
+                placeholder="e.g. 162"
+                placeholderTextColor="#d1d5db"
+                style={{
+                  borderWidth: 1,
+                  borderColor: '#e5e7eb',
+                  borderRadius: 8,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  fontSize: 14,
+                  color: '#1f2937',
+                  backgroundColor: '#f9fafb',
+                }}
+              />
+              {lthrSaveError && (
+                <Text style={{ color: '#ef4444', fontSize: 12, marginTop: 6 }}>
+                  {lthrSaveError}
+                </Text>
+              )}
+
+              <TouchableOpacity
+                onPress={handleSaveLTHR}
+                style={{
+                  backgroundColor: '#2563eb',
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  alignItems: 'center',
+                  marginTop: 20,
+                }}
+              >
+                <Text style={{ color: 'white', fontWeight: '600', fontSize: 14 }}>
+                  Save
+                </Text>
+              </TouchableOpacity>
             </View>
           </KeyboardAvoidingView>
         </View>
