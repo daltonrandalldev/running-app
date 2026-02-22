@@ -10,7 +10,12 @@ import {
   Dimensions,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  Modal,
+  TextInput,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
@@ -35,7 +40,35 @@ type PMCDay = {
   tsb: number;
 };
 
-const PMC_WINDOW_DAYS = 90;
+const PMC_START_DATE_KEY = 'pmc_filter_start_v1';
+
+function todayStr(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+function defaultStartStr(): string {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 1);
+  return d.toISOString().split('T')[0];
+}
+
+// YYYY-MM-DD → MM/DD/YYYY for display
+function toDisplay(iso: string): string {
+  if (!iso) return '';
+  const parts = iso.split('-');
+  if (parts.length !== 3 || !parts[1] || !parts[2]) return iso;
+  const [y, m, d] = parts;
+  return `${m}/${d}/${y}`;
+}
+
+// MM/DD/YYYY → YYYY-MM-DD for storage; returns null if invalid
+function toISO(display: string): string | null {
+  const parts = display.replace(/\s/g, '').split('/');
+  if (parts.length !== 3) return null;
+  const [m, d, y] = parts;
+  if (y.length !== 4 || isNaN(Number(m)) || isNaN(Number(d)) || isNaN(Number(y))) return null;
+  return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+}
 
 function formatDateLabel(dateStr: string): string {
   const d = new Date(dateStr + 'T00:00:00');
@@ -60,7 +93,17 @@ function LegendDot({ color, label }: { color: string; label: string }) {
   );
 }
 
-function PMCChart({ data }: { data: PMCDay[] }) {
+function PMCChart({
+  data,
+  startDate,
+  endDate,
+  onEditDates,
+}: {
+  data: PMCDay[];
+  startDate: string;
+  endDate: string;
+  onEditDates: () => void;
+}) {
   if (data.length < 2) return null;
 
   const CHART_W = SCREEN_WIDTH - 32;
@@ -100,7 +143,7 @@ function PMCChart({ data }: { data: PMCDay[] }) {
   return (
     <View style={{ marginHorizontal: 16, marginTop: 16, marginBottom: 4 }}>
       {/* Header */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
         <Text style={{ fontSize: 17, fontWeight: '700', color: '#111827', flex: 1 }}>
           Performance
         </Text>
@@ -112,6 +155,18 @@ function PMCChart({ data }: { data: PMCDay[] }) {
           color={tsbColor}
         />
       </View>
+
+      {/* Date range row */}
+      <TouchableOpacity
+        onPress={onEditDates}
+        style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}
+      >
+        <Ionicons name="calendar-outline" size={13} color="#9ca3af" style={{ marginRight: 4 }} />
+        <Text style={{ fontSize: 12, color: '#9ca3af' }}>
+          {toDisplay(startDate)} → {toDisplay(endDate)}
+        </Text>
+        <Ionicons name="pencil-outline" size={12} color="#9ca3af" style={{ marginLeft: 5 }} />
+      </TouchableOpacity>
 
       {/* SVG */}
       <Svg width={CHART_W} height={CHART_H}>
@@ -671,6 +726,12 @@ export default function HomeScreen({ navigation }: Props) {
   const [activeTab, setActiveTab] = useState('Activities');
   const [hrZones, setHrZones] = useState<HRZones | null>(null);
 
+  const [pmcStartDate, setPmcStartDate] = useState('');
+  const [pmcEndDate, setPmcEndDate] = useState(todayStr());
+  const [pmcFilterVisible, setPmcFilterVisible] = useState(false);
+  const [draftStart, setDraftStart] = useState('');
+  const [draftEnd, setDraftEnd] = useState('');
+
   // Reload HR zones whenever this screen comes into focus (e.g. after editing in Key Metrics)
   useFocusEffect(
     useCallback(() => {
@@ -678,12 +739,20 @@ export default function HomeScreen({ navigation }: Props) {
     }, [])
   );
 
+  // Load persisted start date once on mount
+  useEffect(() => {
+    AsyncStorage.getItem(PMC_START_DATE_KEY).then((saved) => {
+      setPmcStartDate(saved ?? defaultStartStr());
+    });
+  }, []);
+
+  // Fetch activities (independent of PMC dates)
   useEffect(() => {
     async function fetchData() {
       const tenWeeksAgo = new Date();
       tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
 
-      const [chartRes, recentRes, pmcRes] = await Promise.all([
+      const [chartRes, recentRes] = await Promise.all([
         supabase
           .from('activities')
           .select(
@@ -698,21 +767,29 @@ export default function HomeScreen({ navigation }: Props) {
           )
           .order('start_time', { ascending: false })
           .limit(10),
-        supabase
-          .from('pmc_daily')
-          .select('date, ctl, atl, tsb')
-          .order('date', { ascending: false })
-          .limit(PMC_WINDOW_DAYS),
       ]);
 
       if (chartRes.data) setActivities(chartRes.data);
       if (recentRes.data) setRecentActivities(recentRes.data);
-      if (pmcRes.data) setPmcData([...pmcRes.data].reverse());
       setLoading(false);
     }
 
     fetchData();
   }, []);
+
+  // Re-fetch PMC data whenever the date range changes
+  useEffect(() => {
+    if (!pmcStartDate) return;
+    supabase
+      .from('pmc_daily')
+      .select('date, ctl, atl, tsb')
+      .gte('date', pmcStartDate)
+      .lte('date', pmcEndDate)
+      .order('date', { ascending: true })
+      .then(({ data }) => {
+        if (data) setPmcData(data);
+      });
+  }, [pmcStartDate, pmcEndDate]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#ffffff' }}>
@@ -816,10 +893,19 @@ export default function HomeScreen({ navigation }: Props) {
         )}
 
         {/* PMC Chart */}
-        {!loading && pmcData.length > 0 && (
+        {!loading && pmcStartDate !== '' && pmcData.length > 0 && (
           <View>
             <View style={{ height: 1, backgroundColor: '#f3f4f6', marginTop: 4 }} />
-            <PMCChart data={pmcData} />
+            <PMCChart
+              data={pmcData}
+              startDate={pmcStartDate}
+              endDate={pmcEndDate}
+              onEditDates={() => {
+                setDraftStart(toDisplay(pmcStartDate));
+                setDraftEnd(toDisplay(pmcEndDate));
+                setPmcFilterVisible(true);
+              }}
+            />
           </View>
         )}
 
@@ -879,6 +965,127 @@ export default function HomeScreen({ navigation }: Props) {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* Date range modal */}
+      <Modal
+        visible={pmcFilterVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setPmcFilterVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1, justifyContent: 'flex-end' }}
+        >
+          <View
+            style={{
+              backgroundColor: '#fff',
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              padding: 24,
+              paddingBottom: 40,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: -2 },
+              shadowOpacity: 0.1,
+              shadowRadius: 8,
+              elevation: 10,
+            }}
+          >
+            <Text style={{ fontSize: 17, fontWeight: '700', color: '#111827', marginBottom: 20 }}>
+              Edit Date Range
+            </Text>
+
+            {/* Start date */}
+            <Text style={{ fontSize: 13, color: '#6b7280', marginBottom: 6 }}>Start date</Text>
+            <TextInput
+              value={draftStart}
+              onChangeText={setDraftStart}
+              placeholder="MM/DD/YYYY"
+              keyboardType="numbers-and-punctuation"
+              style={{
+                borderWidth: 1,
+                borderColor: '#d1d5db',
+                borderRadius: 10,
+                paddingHorizontal: 14,
+                paddingVertical: 10,
+                fontSize: 15,
+                color: '#111827',
+                marginBottom: 16,
+              }}
+            />
+
+            {/* End date */}
+            <Text style={{ fontSize: 13, color: '#6b7280', marginBottom: 6 }}>End date</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24 }}>
+              <TextInput
+                value={draftEnd}
+                onChangeText={setDraftEnd}
+                placeholder="MM/DD/YYYY"
+                keyboardType="numbers-and-punctuation"
+                style={{
+                  flex: 1,
+                  borderWidth: 1,
+                  borderColor: '#d1d5db',
+                  borderRadius: 10,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  fontSize: 15,
+                  color: '#111827',
+                }}
+              />
+              <TouchableOpacity
+                onPress={() => setDraftEnd(toDisplay(todayStr()))}
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: '#d1d5db',
+                }}
+              >
+                <Text style={{ fontSize: 14, color: '#6b7280' }}>Today</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Buttons */}
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <TouchableOpacity
+                onPress={() => setPmcFilterVisible(false)}
+                style={{
+                  flex: 1,
+                  paddingVertical: 14,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: '#d1d5db',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 15, color: '#6b7280' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  const isoStart = toISO(draftStart);
+                  const isoEnd = toISO(draftEnd);
+                  if (!isoStart || !isoEnd || isoStart > isoEnd) return;
+                  setPmcStartDate(isoStart);
+                  setPmcEndDate(isoEnd);
+                  AsyncStorage.setItem(PMC_START_DATE_KEY, isoStart);
+                  setPmcFilterVisible(false);
+                }}
+                style={{
+                  flex: 1,
+                  paddingVertical: 14,
+                  borderRadius: 12,
+                  backgroundColor: '#111827',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 15, fontWeight: '600', color: '#fff' }}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
