@@ -20,6 +20,7 @@ After this completes, run:
 import argparse
 import logging
 import os
+import re
 import sys
 
 # ── Dependency checks ────────────────────────────────────────────────────────
@@ -29,7 +30,7 @@ try:
     from garmindb.fit_data import FitData
     from garmindb.activity_fit_file_processor import ActivityFitFileProcessor
     from garmindb.plugin_manager import PluginManager
-    from garmindb.garmindb import GarminDb
+    from garmindb.garmindb import GarminDb, ActivitiesDb, Activities
     import fitfile
 except ImportError:
     sys.exit("Missing dependency — run: pip install garmindb")
@@ -92,16 +93,26 @@ def main():
     plugins_dir = gc_config.get_plugins_dir()
     plugin_manager = PluginManager(plugins_dir, db_params)
 
-    # fit_types=None skips the type filter — all files in the activities
-    # directory are activity FIT files, so no filtering is needed.
     fit_data = FitData(
         activities_dir,
         debug=0,
-        latest=not args.all,
+        latest=False,  # we do our own filtering below
         recursive=False,
         fit_types=None,
         measurement_system=measurement_system,
     )
+
+    if not args.all:
+        # Query local SQLite for activity IDs already imported, then skip those FIT files.
+        # FIT filenames are formatted as "{activity_id}_ACTIVITY.fit".
+        act_db = ActivitiesDb(db_params)
+        with act_db.managed_session() as session:
+            known_ids = {str(r.activity_id) for r in session.query(Activities.activity_id).all()}
+        def _is_new(path):
+            m = re.search(r'/(\d+)_ACTIVITY\.fit$', path, re.IGNORECASE)
+            return m is None or m.group(1) not in known_ids
+
+        fit_data.file_names = [f for f in fit_data.file_names if _is_new(f)]
 
     if fit_data.file_count() == 0:
         logger.info("No new FIT files to import.")

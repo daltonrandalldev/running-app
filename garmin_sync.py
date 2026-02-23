@@ -555,10 +555,9 @@ def sync_sleep(
 def main():
     parser = argparse.ArgumentParser(description="Sync GarminDB SQLite → Supabase garmin_ tables")
     parser.add_argument(
-        "--days",
-        type=int,
-        default=None,
-        help="Only sync data from the last N days (default: all data)",
+        "--all",
+        action="store_true",
+        help="Force a full sync of all data, ignoring the latest-date watermark",
     )
     args = parser.parse_args()
 
@@ -599,17 +598,6 @@ def main():
             "Run garmin_download.py first to populate the local database."
         )
 
-    # ── Date filter ───────────────────────────────────────────────────────────
-    since_dt: Optional[datetime.datetime] = None
-    since_date: Optional[datetime.date] = None
-
-    if args.days is not None:
-        since_date = datetime.date.today() - datetime.timedelta(days=args.days)
-        since_dt = datetime.datetime.combine(since_date, datetime.time.min)
-        logger.info("Syncing data from %s onward (%d days)", since_date, args.days)
-    else:
-        logger.info("Syncing all data")
-
     # ── Open GarminDB sessions ────────────────────────────────────────────────
     garmin_db = GarminDb(db_params)
     act_db = ActivitiesDb(db_params)
@@ -617,6 +605,26 @@ def main():
     # ── Connect to Supabase ───────────────────────────────────────────────────
     logger.info("Connecting to Supabase…")
     conn = psycopg2.connect(db_url)
+
+    # ── Determine since watermarks from what's already in Supabase ───────────
+    since_dt: Optional[datetime.datetime] = None
+    since_date: Optional[datetime.date] = None
+
+    if args.all:
+        logger.info("--all flag set: syncing all data")
+    else:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(start_time) FROM garmin_activities")
+            row = cur.fetchone()
+            latest_activity = row[0] if row and row[0] else None
+
+        if latest_activity is not None:
+            # Strip timezone info for comparison with naive SQLite datetimes
+            since_dt = latest_activity.replace(tzinfo=None)
+            since_date = since_dt.date()
+            logger.info("Latest activity in Supabase: %s — syncing from that date onward", since_dt)
+        else:
+            logger.info("No existing data in Supabase — syncing all data")
 
     total_activities = total_laps = total_summaries = total_sleep = 0
 
