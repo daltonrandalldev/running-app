@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Svg, { Path, Line, Text as SvgText } from 'react-native-svg';
 import {
   View,
@@ -7,6 +7,7 @@ import {
   FlatList,
   TouchableOpacity,
   ActivityIndicator,
+  Alert,
   Dimensions,
   NativeSyntheticEvent,
   NativeScrollEvent,
@@ -24,6 +25,7 @@ import type { CompositeScreenProps } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList, MainTabParamList } from '../App';
 import { supabase } from '../lib/supabase';
+import { triggerSync } from '../lib/syncApi';
 import { loadHRZones, getZoneForHR, type HRZones } from '../lib/hrZones';
 
 type Props = CompositeScreenProps<
@@ -232,6 +234,25 @@ type Activity = {
   active_load: number | null;
   hr_tss: number | null;
 };
+
+const GARMIN_ACTIVITY_SELECT =
+  'activity_id, name, start_time, sport, distance, moving_time_seconds, elapsed_time_seconds, avg_pace_seconds, avg_hr, active_load, hr_tss';
+
+function toActivity(row: any): Activity {
+  return {
+    id: parseInt(row.activity_id, 10),
+    name: row.name,
+    start_time: row.start_time,
+    activity_type: row.sport,
+    distance_km: row.distance,
+    duration_seconds: row.moving_time_seconds ?? row.elapsed_time_seconds,
+    avg_pace_min_per_km: row.avg_pace_seconds != null ? row.avg_pace_seconds / 60 : null,
+    avg_hr: row.avg_hr,
+    is_pr: null,
+    active_load: row.active_load,
+    hr_tss: row.hr_tss,
+  };
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -723,6 +744,7 @@ export default function HomeScreen({ navigation }: Props) {
   const [recentActivities, setRecentActivities] = useState<Activity[]>([]);
   const [pmcData, setPmcData] = useState<PMCDay[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState('Activities');
   const [hrZones, setHrZones] = useState<HRZones | null>(null);
 
@@ -731,6 +753,10 @@ export default function HomeScreen({ navigation }: Props) {
   const [pmcFilterVisible, setPmcFilterVisible] = useState(false);
   const [draftStart, setDraftStart] = useState('');
   const [draftEnd, setDraftEnd] = useState('');
+
+  // Keep a ref to the current pmcStartDate/pmcEndDate so fetchPMC doesn't need them as deps
+  const pmcRangeRef = useRef({ start: '', end: todayStr() });
+  pmcRangeRef.current = { start: pmcStartDate, end: pmcEndDate };
 
   // Reload HR zones whenever this screen comes into focus (e.g. after editing in Key Metrics)
   useFocusEffect(
@@ -746,50 +772,66 @@ export default function HomeScreen({ navigation }: Props) {
     });
   }, []);
 
-  // Fetch activities (independent of PMC dates)
-  useEffect(() => {
-    async function fetchData() {
-      const tenWeeksAgo = new Date();
-      tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
+  const fetchActivities = useCallback(async () => {
+    const tenWeeksAgo = new Date();
+    tenWeeksAgo.setDate(tenWeeksAgo.getDate() - 70);
 
-      const [chartRes, recentRes] = await Promise.all([
-        supabase
-          .from('activities')
-          .select(
-            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr, active_load, hr_tss'
-          )
-          .gte('start_time', tenWeeksAgo.toISOString())
-          .order('start_time', { ascending: true }),
-        supabase
-          .from('activities')
-          .select(
-            'id, name, start_time, activity_type, distance_km, duration_seconds, avg_pace_min_per_km, avg_hr, is_pr, active_load, hr_tss'
-          )
-          .order('start_time', { ascending: false })
-          .limit(10),
-      ]);
+    const [chartRes, recentRes] = await Promise.all([
+      supabase
+        .from('garmin_activities')
+        .select(GARMIN_ACTIVITY_SELECT)
+        .gte('start_time', tenWeeksAgo.toISOString())
+        .order('start_time', { ascending: true }),
+      supabase
+        .from('garmin_activities')
+        .select(GARMIN_ACTIVITY_SELECT)
+        .order('start_time', { ascending: false })
+        .limit(10),
+    ]);
 
-      if (chartRes.data) setActivities(chartRes.data);
-      if (recentRes.data) setRecentActivities(recentRes.data);
-      setLoading(false);
-    }
-
-    fetchData();
+    if (chartRes.data) setActivities(chartRes.data.map(toActivity));
+    if (recentRes.data) setRecentActivities(recentRes.data.map(toActivity));
   }, []);
 
-  // Re-fetch PMC data whenever the date range changes
+  // Fetch activities on mount
   useEffect(() => {
-    if (!pmcStartDate) return;
+    fetchActivities().then(() => setLoading(false));
+  }, [fetchActivities]);
+
+  const fetchPMC = useCallback(() => {
+    const { start, end } = pmcRangeRef.current;
+    if (!start) return;
     supabase
       .from('pmc_daily')
       .select('date, ctl, atl, tsb')
-      .gte('date', pmcStartDate)
-      .lte('date', pmcEndDate)
+      .gte('date', start)
+      .lte('date', end)
       .order('date', { ascending: true })
       .then(({ data }) => {
         if (data) setPmcData(data);
       });
-  }, [pmcStartDate, pmcEndDate]);
+  }, []);
+
+  // Re-fetch PMC data whenever the date range changes
+  useEffect(() => {
+    fetchPMC();
+  }, [pmcStartDate, pmcEndDate, fetchPMC]);
+
+  const handleSync = useCallback(async () => {
+    if (syncing) return;
+    setSyncing(true);
+    const result = await triggerSync();
+    setSyncing(false);
+    if (result.ok) {
+      await fetchActivities();
+      fetchPMC();
+    } else if (result.error?.toLowerCase().includes('reachable')) {
+      Alert.alert(
+        'Sync server not running',
+        'Run this once in the project directory to set it up:\n\npython3 setup_sync_server.py\n\nAfter that the server starts automatically at login.',
+      );
+    }
+  }, [syncing, fetchActivities, fetchPMC]);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#ffffff' }}>
@@ -816,18 +858,24 @@ export default function HomeScreen({ navigation }: Props) {
         >
           Trainer
         </Text>
-        <View
+        <TouchableOpacity
+          onPress={handleSync}
+          disabled={syncing}
           style={{
             width: 36,
             height: 36,
             borderRadius: 18,
-            backgroundColor: '#e5e7eb',
+            backgroundColor: syncing ? '#dbeafe' : '#e5e7eb',
             alignItems: 'center',
             justifyContent: 'center',
           }}
         >
-          <Ionicons name="person" size={20} color="#6b7280" />
-        </View>
+          {syncing ? (
+            <ActivityIndicator size="small" color="#2563eb" />
+          ) : (
+            <Ionicons name="cloud-download-outline" size={20} color="#6b7280" />
+          )}
+        </TouchableOpacity>
       </View>
 
       {/* Pill tabs */}

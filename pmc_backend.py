@@ -25,8 +25,8 @@ Requirements
 
 Schema changes (auto-applied on first run via IF NOT EXISTS)
 ------------------------------------------------------------
-    activities  — adds columns: trimp, pace_load_flat, pace_load_gap, active_load
-    pmc_daily   — new table: date, daily_load, ctl, atl, tsb, updated_at
+    garmin_activities — adds columns: trimp, hr_tss, pace_load_flat, pace_load_gap, active_load
+    pmc_daily         — new table: date, daily_load, ctl, atl, tsb, updated_at
 
 Active load priority
 --------------------
@@ -38,8 +38,10 @@ Active load priority
 
 import math
 import os
+import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 # ── Dependency checks ──────────────────────────────────────────────────────────
@@ -75,11 +77,11 @@ CONFIG = {
 # ─── SCHEMA MIGRATIONS (idempotent DDL) ───────────────────────────────────────
 
 MIGRATIONS = [
-    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS trimp          DOUBLE PRECISION",
-    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS pace_load_flat DOUBLE PRECISION",
-    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS pace_load_gap  DOUBLE PRECISION",
-    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS active_load    DOUBLE PRECISION",
-    "ALTER TABLE activities ADD COLUMN IF NOT EXISTS hr_tss         DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS trimp          DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS pace_load_flat DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS pace_load_gap  DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS active_load    DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS hr_tss         DOUBLE PRECISION",
     """
     CREATE TABLE IF NOT EXISTS lthr_settings (
         id         INTEGER      PRIMARY KEY DEFAULT 1,
@@ -193,6 +195,109 @@ def compute_hr_tss(
     if lthr_hrr == 0:
         return None
     return (duration_sec * (hrr / lthr_hrr) ** 2 * 100.0) / 3600.0
+
+
+# ─── GRANULAR TSS FROM GARMIN RECORDS ────────────────────────────────────────
+#
+# When the local GarminDB SQLite is present, per-record HR data (~3 s intervals)
+# is used instead of avg_hr for TRIMP and hrTSS.  This matters because both
+# formulas apply a non-linear weighting to HR (exponential for TRIMP, quadratic
+# for hrTSS).  f(avg_hr) systematically underestimates load for activities with
+# HR variability — interval sessions, trail runs, surges — because high-HR
+# spikes contribute disproportionately to actual training stress.
+#
+# Granular approach: sum f(hr_i) × Δt_i over every record interval.
+# Avg-HR fallback:   compute f(avg_hr) × total_duration  (existing behaviour).
+#
+# Activities not present in the SQLite (e.g. older activities not yet
+# downloaded with garmin_download.py --all) fall back automatically.
+
+GARMIN_SQLITE = Path.home() / "HealthData" / "DBs" / "garmin_activities.db"
+
+
+def load_garmin_records() -> dict:
+    """
+    Load HR records from the local GarminDB SQLite into memory.
+
+    Returns {activity_id_str: [(datetime, hr_int), ...]} sorted by timestamp.
+    Returns {} if the file doesn't exist — all activities will use avg_hr.
+    """
+    if not GARMIN_SQLITE.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(str(GARMIN_SQLITE))
+        rows = conn.execute(
+            "SELECT activity_id, timestamp, hr "
+            "FROM activity_records "
+            "WHERE hr IS NOT NULL "
+            "ORDER BY activity_id, record"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        print(f"  ⚠  Could not read GarminDB SQLite ({exc}); using avg_hr for all activities")
+        return {}
+
+    records: dict = {}
+    for activity_id, ts_str, hr in rows:
+        # Strip microseconds — fromisoformat on Python 3.9 doesn't handle 6-digit µs
+        ts = datetime.fromisoformat(ts_str[:19])
+        records.setdefault(str(activity_id), []).append((ts, int(hr)))
+    return records
+
+
+def compute_trimp_granular(
+    records: list,
+    resting_hr: float,
+    max_hr: float,
+) -> Optional[float]:
+    """
+    Banister TRIMP summed over per-record intervals.
+
+    Uses midpoint HR for each interval.  Skips gaps > 5 min (auto-pause,
+    GPS loss) so paused time doesn't silently inflate the score.
+    """
+    if len(records) < 2:
+        return None
+    total = 0.0
+    for i in range(1, len(records)):
+        ts_prev, hr_prev = records[i - 1]
+        ts_curr, hr_curr = records[i]
+        dt_sec = (ts_curr - ts_prev).total_seconds()
+        if dt_sec <= 0 or dt_sec > 300:
+            continue
+        hr = (hr_prev + hr_curr) / 2.0
+        hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
+        dt_min = dt_sec / 60.0
+        total += dt_min * hrr * 0.64 * math.exp(1.92 * hrr)
+    return total if total > 0 else None
+
+
+def compute_hr_tss_granular(
+    records: list,
+    resting_hr: float,
+    max_hr: float,
+    lthr: float,
+) -> Optional[float]:
+    """
+    hrTSS summed over per-record intervals.
+
+    Each interval contributes (Δt_sec × (hrr / lthr_hrr)² × 100) / 3600.
+    Pauses > 5 min are skipped; midpoint HR is used for each interval.
+    """
+    lthr_hrr = max(0.0, min(1.0, (lthr - resting_hr) / (max_hr - resting_hr)))
+    if lthr_hrr == 0 or len(records) < 2:
+        return None
+    total = 0.0
+    for i in range(1, len(records)):
+        ts_prev, hr_prev = records[i - 1]
+        ts_curr, hr_curr = records[i]
+        dt_sec = (ts_curr - ts_prev).total_seconds()
+        if dt_sec <= 0 or dt_sec > 300:
+            continue
+        hr = (hr_prev + hr_curr) / 2.0
+        hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
+        total += dt_sec * (hrr / lthr_hrr) ** 2 * 100.0 / 3600.0
+    return total if total > 0 else None
 
 
 def determine_active_load(
@@ -349,16 +454,16 @@ def main() -> None:
                 print("\nFetching activities…")
                 cur.execute("""
                     SELECT
-                        id,
-                        activity_type,
+                        activity_id,
+                        sport,
                         start_time,
-                        duration_seconds,
-                        distance_km,
+                        COALESCE(moving_time_seconds, elapsed_time_seconds) AS duration_seconds,
+                        distance,
                         avg_hr,
-                        elevation_gain_m
-                    FROM activities
-                    WHERE duration_seconds IS NOT NULL
-                      AND duration_seconds > 0
+                        ascent
+                    FROM garmin_activities
+                    WHERE COALESCE(moving_time_seconds, elapsed_time_seconds) IS NOT NULL
+                      AND COALESCE(moving_time_seconds, elapsed_time_seconds) > 0
                     ORDER BY start_time ASC
                 """)
                 activity_rows = cur.fetchall()
@@ -368,11 +473,26 @@ def main() -> None:
                     print("Nothing to process.")
                     return
 
-                # ── 4. Compute per-activity loads ──────────────────────────────
+                # ── 4. Load per-record HR data from local GarminDB SQLite ──────
+                print("Loading per-record HR data from GarminDB SQLite…")
+                garmin_records = load_garmin_records()
+                if garmin_records:
+                    n_with_records = sum(
+                        1 for (act_id, *_) in activity_rows
+                        if str(act_id) in garmin_records
+                    )
+                    print(f"  ✓ Records found for {n_with_records}/{len(activity_rows)} activities "
+                          f"— granular TRIMP/hrTSS will be used for those")
+                else:
+                    print("  ⚠  SQLite not found or empty — using avg_hr for all activities")
+                    n_with_records = 0
+
+                # ── 5. Compute per-activity loads ──────────────────────────────
                 print("Computing per-activity load scores…")
 
                 activity_updates = []
                 daily_loads: dict = {}
+                n_granular = 0
 
                 for (act_id, act_type, start_time, dur_sec,
                      dist_km, avg_hr, elev_gain) in activity_rows:
@@ -385,12 +505,20 @@ def main() -> None:
                     t_type    = (act_type or "").lower()
                     is_run    = "run" in t_type
 
-                    # TRIMP (all activity types with HR)
+                    # Per-record HR data for this activity (empty list = fallback to avg_hr)
+                    act_records = garmin_records.get(str(act_id), [])
+                    used_granular = bool(act_records)
+                    if used_granular:
+                        n_granular += 1
+
+                    # TRIMP — granular when records available, avg_hr otherwise
                     _trimp: Optional[float] = None
-                    if avg_hr is not None and float(avg_hr) > 0:
+                    if act_records:
+                        _trimp = compute_trimp_granular(act_records, resting_hr, max_hr)
+                    elif avg_hr is not None and float(avg_hr) > 0:
                         _trimp = compute_trimp(dur_min, float(avg_hr), resting_hr, max_hr)
 
-                    # Pace loads (running only)
+                    # Pace loads (running only — unchanged, uses activity-level aggregates)
                     _flat = _gap = None
                     if is_run and dist_km is not None and float(dist_km) > 0:
                         elev = float(elev_gain) if elev_gain is not None else None
@@ -398,18 +526,21 @@ def main() -> None:
                             float(dist_km), dur_min, elev, t_pace
                         )
 
-                    # hrTSS (all activity types with HR, when LTHR is configured)
+                    # hrTSS — granular when records available, avg_hr otherwise
                     _hr_tss: Optional[float] = None
-                    if lthr is not None and avg_hr is not None and float(avg_hr) > 0:
-                        _hr_tss = compute_hr_tss(
-                            float(dur_sec), float(avg_hr), resting_hr, max_hr, lthr
-                        )
+                    if lthr is not None:
+                        if act_records:
+                            _hr_tss = compute_hr_tss_granular(act_records, resting_hr, max_hr, lthr)
+                        elif avg_hr is not None and float(avg_hr) > 0:
+                            _hr_tss = compute_hr_tss(
+                                float(dur_sec), float(avg_hr), resting_hr, max_hr, lthr
+                            )
 
                     has_elev = (elev_gain is not None and float(elev_gain) > 0)
                     _active  = determine_active_load(is_run, _flat, _gap, _hr_tss, has_elev)
 
                     activity_updates.append({
-                        "id"             : act_id,
+                        "activity_id"    : act_id,
                         "trimp"          : round(_trimp,   4) if _trimp   is not None else None,
                         "pace_load_flat" : round(_flat,    4) if _flat    is not None else None,
                         "pace_load_gap"  : round(_gap,     4) if _gap     is not None else None,
@@ -426,7 +557,7 @@ def main() -> None:
 
                 cur.execute("""
                     CREATE TEMP TABLE _tmp_loads (
-                        id             BIGINT,
+                        activity_id    TEXT,
                         trimp          DOUBLE PRECISION,
                         pace_load_flat DOUBLE PRECISION,
                         pace_load_gap  DOUBLE PRECISION,
@@ -439,14 +570,14 @@ def main() -> None:
                     cur,
                     "INSERT INTO _tmp_loads VALUES %s",
                     [
-                        (u["id"], u["trimp"], u["pace_load_flat"],
+                        (u["activity_id"], u["trimp"], u["pace_load_flat"],
                          u["pace_load_gap"], u["active_load"], u["hr_tss"])
                         for u in activity_updates
                     ],
                 )
 
                 cur.execute("""
-                    UPDATE activities a
+                    UPDATE garmin_activities a
                     SET
                         trimp          = t.trimp,
                         pace_load_flat = t.pace_load_flat,
@@ -454,7 +585,7 @@ def main() -> None:
                         active_load    = t.active_load,
                         hr_tss         = t.hr_tss
                     FROM _tmp_loads t
-                    WHERE a.id = t.id
+                    WHERE a.activity_id = t.activity_id
                 """)
                 updated = cur.rowcount
                 print(f"  ✓ Updated {updated} activities")
@@ -498,12 +629,19 @@ def main() -> None:
                 # ── 8. Summary ─────────────────────────────────────────────────
                 latest   = pmc_rows[-1]
                 non_zero = sum(1 for v in daily_loads.values() if v > 0)
+                n_avg_hr = len(activity_rows) - n_granular
 
                 print(f"\n── PMC Summary ({latest['date']}) ────────────────")
                 print(f"  Active days with load : {non_zero}")
                 print(f"  Fitness (CTL)         : {latest['ctl']:.1f}")
                 print(f"  Fatigue (ATL)         : {latest['atl']:.1f}")
                 print(f"  Form    (TSB)         : {latest['tsb']:.1f}")
+                print(f"\n── TSS method ────────────────────────────────────")
+                print(f"  Granular (per-record) : {n_granular} activities")
+                print(f"  Avg-HR fallback       : {n_avg_hr} activities")
+                if n_avg_hr > 0 and n_granular == 0:
+                    print(f"  ↳ Run 'python3 garmin_download.py --all' to download")
+                    print(f"    records for all activities and enable granular TSS")
                 print(f"\n✓ Pipeline complete — transaction committed")
 
                 # ── 9. Notify PostgREST to reload schema cache ─────────────────

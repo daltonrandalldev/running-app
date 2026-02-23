@@ -102,13 +102,49 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
   useEffect(() => {
     async function fetchActivity() {
       const { data } = await supabase
-        .from('activities')
-        .select('*')
-        .eq('id', activityId)
+        .from('garmin_activities')
+        .select(
+          'activity_id, name, start_time, sport, moving_time_seconds, elapsed_time_seconds, ' +
+          'distance, avg_pace_seconds, avg_speed, calories, avg_hr, max_hr, ascent, descent, ' +
+          'avg_cadence, max_cadence, steps, avg_step_length, min_temperature, max_temperature, ' +
+          'start_lat, start_long, active_load, hr_tss, trimp, pace_load_flat, pace_load_gap'
+        )
+        .eq('activity_id', activityId.toString())
         .single();
       if (data) {
-        setActivity(data);
-        setFavorite(data.is_favorite ?? false);
+        setActivity({
+          id: parseInt(data.activity_id, 10),
+          name: data.name,
+          start_time: data.start_time,
+          activity_type: data.sport,
+          duration_seconds: data.moving_time_seconds ?? data.elapsed_time_seconds,
+          distance_km: data.distance,
+          avg_pace_min_per_km: data.avg_pace_seconds != null ? data.avg_pace_seconds / 60 : null,
+          avg_speed_ms: data.avg_speed != null ? data.avg_speed / 3.6 : null,
+          calories: data.calories,
+          avg_hr: data.avg_hr,
+          max_hr: data.max_hr,
+          elevation_gain_m: data.ascent,
+          elevation_loss_m: data.descent,
+          min_elevation_m: null,
+          max_elevation_m: null,
+          avg_cadence: data.avg_cadence,
+          max_cadence: data.max_cadence,
+          steps: data.steps,
+          avg_stride_length_m: data.avg_step_length,
+          min_temperature_c: data.min_temperature,
+          max_temperature_c: data.max_temperature,
+          location_name: null,
+          start_latitude: data.start_lat,
+          start_longitude: data.start_long,
+          is_pr: null,
+          is_favorite: null,
+          active_load: data.active_load,
+          hr_tss: data.hr_tss,
+          trimp: data.trimp,
+          pace_load_flat: data.pace_load_flat,
+          pace_load_gap: data.pace_load_gap,
+        });
       }
       setLoading(false);
     }
@@ -116,9 +152,8 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
   }, [activityId]);
 
   async function toggleFavorite() {
-    const next = !favorite;
-    setFavorite(next);
-    await supabase.from('activities').update({ is_favorite: next }).eq('id', activityId);
+    // garmin_activities does not have is_favorite — toggle is visual only
+    setFavorite((prev) => !prev);
   }
 
   if (loading) {
