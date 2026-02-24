@@ -35,6 +35,7 @@ type ActivityDetail = {
   is_pr: boolean | null;
   is_favorite: boolean | null;
   active_load: number | null;
+  hrss: number | null;
   hr_tss: number | null;
   trimp: number | null;
   pace_load_flat: number | null;
@@ -107,7 +108,7 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           'activity_id, name, start_time, sport, moving_time_seconds, elapsed_time_seconds, ' +
           'distance, avg_pace_seconds, avg_speed, calories, avg_hr, max_hr, ascent, descent, ' +
           'avg_cadence, max_cadence, steps, avg_step_length, min_temperature, max_temperature, ' +
-          'start_lat, start_long, active_load, hr_tss, trimp, pace_load_flat, pace_load_gap'
+          'start_lat, start_long, active_load, hrss, hr_tss, trimp, pace_load_flat, pace_load_gap'
         )
         .eq('activity_id', activityId.toString())
         .single();
@@ -140,6 +141,7 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           is_pr: null,
           is_favorite: null,
           active_load: data.active_load,
+          hrss: data.hrss,
           hr_tss: data.hr_tss,
           trimp: data.trimp,
           pace_load_flat: data.pace_load_flat,
@@ -250,15 +252,15 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
         </Section>
 
         {/* Training Load */}
-        {(activity.active_load != null || activity.hr_tss != null || activity.trimp != null) && (
+        {(activity.active_load != null || activity.hrss != null || activity.trimp != null) && (
           <Section title="Training Load">
             <StatCard
               label="Load (PMC)"
               value={activity.active_load != null ? activity.active_load.toFixed(1) : null}
             />
             <StatCard
-              label="hrTSS"
-              value={activity.hr_tss != null ? activity.hr_tss.toFixed(1) : null}
+              label="HRSS"
+              value={activity.hrss != null ? activity.hrss.toFixed(1) : null}
             />
             <StatCard
               label="TRIMP"

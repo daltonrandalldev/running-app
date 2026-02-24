@@ -696,7 +696,7 @@ function ActivityRow({
           }}
         >
           <Text style={{ fontSize: 26, fontWeight: '600', color: '#1a1a1a' }}>
-            {activity.hr_tss != null ? Math.round(activity.hr_tss) : activity.active_load != null ? Math.round(activity.active_load) : '--'}
+            {activity.active_load != null ? Math.round(activity.active_load) : '--'}
           </Text>
         </View>
 
