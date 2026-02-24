@@ -250,31 +250,44 @@ def compute_trimp_granular(
     records: list,
     resting_hr: float,
     max_hr: float,
+    moving_time_sec: Optional[float] = None,
 ) -> Optional[float]:
     """
     Banister TRIMP summed over per-record intervals.
 
     Uses midpoint HR for each interval.  Skips gaps > 5 min (auto-pause,
-    GPS loss) and zero-speed intervals (stopped/paused) so only moving
-    time contributes to the score.
+    GPS loss) and intervals where GPS explicitly confirms both endpoints are
+    stopped (speed == 0).  NULL speed (e.g. indoor cycling) is not filtered.
+
+    If moving_time_sec is provided and less than the total accumulated time,
+    the result is scaled proportionally so the granular sum reflects moving
+    time rather than elapsed time (handles auto-pause periods where Garmin
+    continues recording HR but doesn't count the time as moving).
     """
     if len(records) < 2:
         return None
     total = 0.0
+    total_time = 0.0
     for i in range(1, len(records)):
         ts_prev, hr_prev, spd_prev = records[i - 1]
         ts_curr, hr_curr, spd_curr = records[i]
         dt_sec = (ts_curr - ts_prev).total_seconds()
         if dt_sec <= 0 or dt_sec > 300:
             continue
-        # Skip intervals where both endpoints show no movement
-        if (spd_prev or 0) == 0 and (spd_curr or 0) == 0:
+        # Skip only when GPS explicitly confirms both endpoints are stopped.
+        # NULL speed means no GPS data (e.g. indoor) — never filter those out.
+        if spd_prev is not None and spd_prev == 0 and spd_curr is not None and spd_curr == 0:
             continue
         hr = (hr_prev + hr_curr) / 2.0
         hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
         dt_min = dt_sec / 60.0
         total += dt_min * hrr * 0.64 * math.exp(1.92 * hrr)
-    return total if total > 0 else None
+        total_time += dt_sec
+    if total <= 0:
+        return None
+    if moving_time_sec is not None and total_time > 0 and moving_time_sec < total_time:
+        total *= moving_time_sec / total_time
+    return total
 
 
 def compute_hr_tss_granular(
@@ -282,31 +295,38 @@ def compute_hr_tss_granular(
     resting_hr: float,
     max_hr: float,
     lthr: float,
+    moving_time_sec: Optional[float] = None,
 ) -> Optional[float]:
     """
     hrTSS summed over per-record intervals.
 
     Each interval contributes (Δt_sec × (hrr / lthr_hrr)² × 100) / 3600.
-    Pauses > 5 min are skipped; intervals where both endpoints have zero
-    speed are skipped (moving time only); midpoint HR is used for each interval.
+    Pauses > 5 min are skipped; intervals where GPS explicitly confirms both
+    endpoints are stopped (speed == 0) are skipped.  NULL speed is not filtered.
+    Result is scaled by moving_time_sec / total_time when provided.
     """
     lthr_hrr = max(0.0, min(1.0, (lthr - resting_hr) / (max_hr - resting_hr)))
     if lthr_hrr == 0 or len(records) < 2:
         return None
     total = 0.0
+    total_time = 0.0
     for i in range(1, len(records)):
         ts_prev, hr_prev, spd_prev = records[i - 1]
         ts_curr, hr_curr, spd_curr = records[i]
         dt_sec = (ts_curr - ts_prev).total_seconds()
         if dt_sec <= 0 or dt_sec > 300:
             continue
-        # Skip intervals where both endpoints show no movement
-        if (spd_prev or 0) == 0 and (spd_curr or 0) == 0:
+        if spd_prev is not None and spd_prev == 0 and spd_curr is not None and spd_curr == 0:
             continue
         hr = (hr_prev + hr_curr) / 2.0
         hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
         total += dt_sec * (hrr / lthr_hrr) ** 2 * 100.0 / 3600.0
-    return total if total > 0 else None
+        total_time += dt_sec
+    if total <= 0:
+        return None
+    if moving_time_sec is not None and total_time > 0 and moving_time_sec < total_time:
+        total *= moving_time_sec / total_time
+    return total
 
 
 def determine_active_load(
@@ -530,7 +550,9 @@ def main() -> None:
                     # TRIMP — granular when records available, avg_hr otherwise
                     _trimp: Optional[float] = None
                     if act_records:
-                        _trimp = compute_trimp_granular(act_records, resting_hr, max_hr)
+                        _trimp = compute_trimp_granular(
+                            act_records, resting_hr, max_hr, moving_time_sec=float(dur_sec)
+                        )
                     elif avg_hr is not None and float(avg_hr) > 0:
                         _trimp = compute_trimp(dur_min, float(avg_hr), resting_hr, max_hr)
 
@@ -546,7 +568,9 @@ def main() -> None:
                     _hr_tss: Optional[float] = None
                     if lthr is not None:
                         if act_records:
-                            _hr_tss = compute_hr_tss_granular(act_records, resting_hr, max_hr, lthr)
+                            _hr_tss = compute_hr_tss_granular(
+                                act_records, resting_hr, max_hr, lthr, moving_time_sec=float(dur_sec)
+                            )
                         elif avg_hr is not None and float(avg_hr) > 0:
                             _hr_tss = compute_hr_tss(
                                 float(dur_sec), float(avg_hr), resting_hr, max_hr, lthr
