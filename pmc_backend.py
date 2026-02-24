@@ -82,6 +82,7 @@ MIGRATIONS = [
     "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS pace_load_gap  DOUBLE PRECISION",
     "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS active_load    DOUBLE PRECISION",
     "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS hr_tss         DOUBLE PRECISION",
+    "ALTER TABLE garmin_activities ADD COLUMN IF NOT EXISTS hrss           DOUBLE PRECISION",
     """
     CREATE TABLE IF NOT EXISTS lthr_settings (
         id         INTEGER      PRIMARY KEY DEFAULT 1,
@@ -219,7 +220,7 @@ def load_garmin_records() -> dict:
     """
     Load HR records from the local GarminDB SQLite into memory.
 
-    Returns {activity_id_str: [(datetime, hr_int), ...]} sorted by timestamp.
+    Returns {activity_id_str: [(datetime, hr_int, speed_float|None), ...]} sorted by timestamp.
     Returns {} if the file doesn't exist — all activities will use avg_hr.
     """
     if not GARMIN_SQLITE.exists():
@@ -227,7 +228,7 @@ def load_garmin_records() -> dict:
     try:
         conn = sqlite3.connect(str(GARMIN_SQLITE))
         rows = conn.execute(
-            "SELECT activity_id, timestamp, hr "
+            "SELECT activity_id, timestamp, hr, speed "
             "FROM activity_records "
             "WHERE hr IS NOT NULL "
             "ORDER BY activity_id, record"
@@ -238,10 +239,10 @@ def load_garmin_records() -> dict:
         return {}
 
     records: dict = {}
-    for activity_id, ts_str, hr in rows:
+    for activity_id, ts_str, hr, speed in rows:
         # Strip microseconds — fromisoformat on Python 3.9 doesn't handle 6-digit µs
         ts = datetime.fromisoformat(ts_str[:19])
-        records.setdefault(str(activity_id), []).append((ts, int(hr)))
+        records.setdefault(str(activity_id), []).append((ts, int(hr), speed))
     return records
 
 
@@ -254,16 +255,20 @@ def compute_trimp_granular(
     Banister TRIMP summed over per-record intervals.
 
     Uses midpoint HR for each interval.  Skips gaps > 5 min (auto-pause,
-    GPS loss) so paused time doesn't silently inflate the score.
+    GPS loss) and zero-speed intervals (stopped/paused) so only moving
+    time contributes to the score.
     """
     if len(records) < 2:
         return None
     total = 0.0
     for i in range(1, len(records)):
-        ts_prev, hr_prev = records[i - 1]
-        ts_curr, hr_curr = records[i]
+        ts_prev, hr_prev, spd_prev = records[i - 1]
+        ts_curr, hr_curr, spd_curr = records[i]
         dt_sec = (ts_curr - ts_prev).total_seconds()
         if dt_sec <= 0 or dt_sec > 300:
+            continue
+        # Skip intervals where both endpoints show no movement
+        if (spd_prev or 0) == 0 and (spd_curr or 0) == 0:
             continue
         hr = (hr_prev + hr_curr) / 2.0
         hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
@@ -282,17 +287,21 @@ def compute_hr_tss_granular(
     hrTSS summed over per-record intervals.
 
     Each interval contributes (Δt_sec × (hrr / lthr_hrr)² × 100) / 3600.
-    Pauses > 5 min are skipped; midpoint HR is used for each interval.
+    Pauses > 5 min are skipped; intervals where both endpoints have zero
+    speed are skipped (moving time only); midpoint HR is used for each interval.
     """
     lthr_hrr = max(0.0, min(1.0, (lthr - resting_hr) / (max_hr - resting_hr)))
     if lthr_hrr == 0 or len(records) < 2:
         return None
     total = 0.0
     for i in range(1, len(records)):
-        ts_prev, hr_prev = records[i - 1]
-        ts_curr, hr_curr = records[i]
+        ts_prev, hr_prev, spd_prev = records[i - 1]
+        ts_curr, hr_curr, spd_curr = records[i]
         dt_sec = (ts_curr - ts_prev).total_seconds()
         if dt_sec <= 0 or dt_sec > 300:
+            continue
+        # Skip intervals where both endpoints show no movement
+        if (spd_prev or 0) == 0 and (spd_curr or 0) == 0:
             continue
         hr = (hr_prev + hr_curr) / 2.0
         hrr = max(0.0, min(1.0, (hr - resting_hr) / (max_hr - resting_hr)))
@@ -304,18 +313,18 @@ def determine_active_load(
     is_run: bool,
     pace_load_flat: Optional[float],
     pace_load_gap: Optional[float],
-    hr_tss_score: Optional[float],
+    hrss: Optional[float],
     has_elevation: bool,
 ) -> Optional[float]:
     """
     Priority (highest to lowest):
-      1. Any activity with HR → hr_tss
+      1. Any activity with HR → hrss (normalized TRIMP — matches intervals.icu HR load)
       2. Running + elevation  → pace_load_gap  (fallback when no HR)
       3. Running              → pace_load_flat (fallback when no HR)
       4. Otherwise            → None (NULL in DB)
     """
-    if hr_tss_score is not None and hr_tss_score > 0:
-        return hr_tss_score
+    if hrss is not None and hrss > 0:
+        return hrss
     if is_run and has_elevation and pace_load_gap is not None:
         return pace_load_gap
     if is_run and pace_load_flat is not None:
@@ -446,7 +455,14 @@ def main() -> None:
                         lthr = float(row[0])
                         print(f"  ✓ LTHR: {lthr:.0f} bpm (from lthr_settings table)")
                     else:
-                        print("  ⚠  LTHR not set — hr_tss will be NULL")
+                        print("  ⚠  LTHR not set — hrss will be NULL")
+
+                # HRSS normalisation constant: TRIMP score for 1 hour at exactly LTHR.
+                # HRSS = trimp_activity / trimp_ref_per_hour * 100
+                trimp_ref_per_hour: Optional[float] = None
+                if lthr is not None:
+                    lthr_hrr = max(0.0, min(1.0, (lthr - resting_hr) / (max_hr - resting_hr)))
+                    trimp_ref_per_hour = 60.0 * lthr_hrr * 0.64 * math.exp(1.92 * lthr_hrr)
 
                 print(f"  HR params: resting={resting_hr:.0f}  max={max_hr:.0f}  LTHR={f'{lthr:.0f} bpm' if lthr else 'not set'}")
 
@@ -482,7 +498,7 @@ def main() -> None:
                         if str(act_id) in garmin_records
                     )
                     print(f"  ✓ Records found for {n_with_records}/{len(activity_rows)} activities "
-                          f"— granular TRIMP/hrTSS will be used for those")
+                          f"— granular TRIMP/HRSS will be used for those")
                 else:
                     print("  ⚠  SQLite not found or empty — using avg_hr for all activities")
                     n_with_records = 0
@@ -526,7 +542,7 @@ def main() -> None:
                             float(dist_km), dur_min, elev, t_pace
                         )
 
-                    # hrTSS — granular when records available, avg_hr otherwise
+                    # hrTSS — kept for reference; no longer used as active_load
                     _hr_tss: Optional[float] = None
                     if lthr is not None:
                         if act_records:
@@ -536,8 +552,13 @@ def main() -> None:
                                 float(dur_sec), float(avg_hr), resting_hr, max_hr, lthr
                             )
 
+                    # HRSS — normalized TRIMP; matches intervals.icu HR load
+                    _hrss: Optional[float] = None
+                    if _trimp is not None and trimp_ref_per_hour:
+                        _hrss = _trimp * 100.0 / trimp_ref_per_hour
+
                     has_elev = (elev_gain is not None and float(elev_gain) > 0)
-                    _active  = determine_active_load(is_run, _flat, _gap, _hr_tss, has_elev)
+                    _active  = determine_active_load(is_run, _flat, _gap, _hrss, has_elev)
 
                     activity_updates.append({
                         "activity_id"    : act_id,
@@ -546,6 +567,7 @@ def main() -> None:
                         "pace_load_gap"  : round(_gap,     4) if _gap     is not None else None,
                         "active_load"    : round(_active,  4) if _active  is not None else None,
                         "hr_tss"         : round(_hr_tss,  4) if _hr_tss  is not None else None,
+                        "hrss"           : round(_hrss,    4) if _hrss    is not None else None,
                     })
 
                     if _active is not None:
@@ -562,7 +584,8 @@ def main() -> None:
                         pace_load_flat DOUBLE PRECISION,
                         pace_load_gap  DOUBLE PRECISION,
                         active_load    DOUBLE PRECISION,
-                        hr_tss         DOUBLE PRECISION
+                        hr_tss         DOUBLE PRECISION,
+                        hrss           DOUBLE PRECISION
                     ) ON COMMIT DROP
                 """)
 
@@ -571,7 +594,7 @@ def main() -> None:
                     "INSERT INTO _tmp_loads VALUES %s",
                     [
                         (u["activity_id"], u["trimp"], u["pace_load_flat"],
-                         u["pace_load_gap"], u["active_load"], u["hr_tss"])
+                         u["pace_load_gap"], u["active_load"], u["hr_tss"], u["hrss"])
                         for u in activity_updates
                     ],
                 )
@@ -583,7 +606,8 @@ def main() -> None:
                         pace_load_flat = t.pace_load_flat,
                         pace_load_gap  = t.pace_load_gap,
                         active_load    = t.active_load,
-                        hr_tss         = t.hr_tss
+                        hr_tss         = t.hr_tss,
+                        hrss           = t.hrss
                     FROM _tmp_loads t
                     WHERE a.activity_id = t.activity_id
                 """)
