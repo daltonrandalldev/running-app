@@ -830,6 +830,13 @@ export default function HomeScreen({ navigation }: Props) {
         'Sync server not running',
         'Run this once in the project directory to set it up:\n\npython3 setup_sync_server.py\n\nAfter that the server starts automatically at login.',
       );
+    } else {
+      const step = (result as any).failed_step;
+      const detail = (result as any).results?.[step]?.output ?? result.error ?? 'Unknown error';
+      Alert.alert(
+        'Sync failed' + (step ? ` (${step})` : ''),
+        detail.slice(-300),
+      );
     }
   }, [syncing, fetchActivities, fetchPMC]);
 
