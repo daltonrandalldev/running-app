@@ -18,6 +18,7 @@
 
 import { supabase } from './supabase';
 import { recalculatePMC } from './pmcRecalc';
+import { triggerRefitAsync, getCurrentParamVersion } from './pmcFittingDb.ts';
 import {
   calculatePerformanceScore,
   checkBenchmarkCriteria,
@@ -121,6 +122,9 @@ export async function saveBenchmarkEffort(
       .eq('athlete_id', SINGLE_ATHLETE_ID)
       .maybeSingle();
 
+    // Snapshot the active parameter version for audit history (Gap 2)
+    const paramVersion = await getCurrentParamVersion(SINGLE_ATHLETE_ID);
+
     const payload = {
       athlete_id: SINGLE_ATHLETE_ID,
       activity_id: params.activity_id,
@@ -132,6 +136,7 @@ export async function saveBenchmarkEffort(
       ctl_on_date: ctlOnDate,
       atl_on_date: atlOnDate,
       notes: params.notes ?? null,
+      param_version: paramVersion,
     };
 
     let data: BenchmarkEffort | null = null;
@@ -153,6 +158,10 @@ export async function saveBenchmarkEffort(
     }
 
     if (error) throw error;
+
+    // R4: Trigger async refit — does not block UI (PMC-004)
+    triggerRefitAsync(SINGLE_ATHLETE_ID, 'combined');
+
     return { ok: true, data: data ?? undefined };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? 'Unknown error' };
