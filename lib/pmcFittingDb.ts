@@ -371,28 +371,43 @@ export function triggerRefitAsync(
 /**
  * On-app-open monthly refit check (Gap 1 — Option B).
  *
- * Runs a refit if athlete_parameters has no fitted_at, or if the last fit
- * was more than REFIT_INTERVAL_DAYS ago. Does not block the UI — await this
- * in a useEffect with no loading state shown to the user.
+ * Checks all three sport series ('run', 'cycle', 'combined') independently.
+ * Triggers a refit for any sport that has never been fitted or whose last fit
+ * was more than REFIT_INTERVAL_DAYS ago. Each sport's staleness is evaluated
+ * in parallel — a stale 'run' refit never blocks or skips 'cycle'.
+ *
+ * Does not block the UI — await this in a useEffect with no loading state.
  */
 export async function maybeRefitOnAppOpen(
   athleteId: string = SINGLE_ATHLETE_ID,
 ): Promise<void> {
   try {
-    const params = await fetchCurrentParams(athleteId, 'combined');
+    const [runParams, cycleParams, combinedParams] = await Promise.all([
+      fetchCurrentParams(athleteId, 'run'),
+      fetchCurrentParams(athleteId, 'cycle'),
+      fetchCurrentParams(athleteId, 'combined'),
+    ]);
 
-    if (!params?.fitted_at) {
-      // Never been fitted — try now (will no-op if not yet eligible)
-      triggerRefitAsync(athleteId, 'combined');
-      return;
-    }
+    const checks = [
+      { sport: 'run', params: runParams },
+      { sport: 'cycle', params: cycleParams },
+      { sport: 'combined', params: combinedParams },
+    ] as const;
 
-    const lastFit = new Date(params.fitted_at);
-    const daysSince =
-      (Date.now() - lastFit.getTime()) / (1000 * 60 * 60 * 24);
+    for (const { sport, params } of checks) {
+      if (!params?.fitted_at) {
+        // Never been fitted — try now (will no-op if not yet eligible)
+        triggerRefitAsync(athleteId, sport);
+        continue;
+      }
 
-    if (daysSince >= REFIT_INTERVAL_DAYS) {
-      triggerRefitAsync(athleteId, 'combined');
+      const lastFit = new Date(params.fitted_at);
+      const daysSince =
+        (Date.now() - lastFit.getTime()) / (1000 * 60 * 60 * 24);
+
+      if (daysSince >= REFIT_INTERVAL_DAYS) {
+        triggerRefitAsync(athleteId, sport);
+      }
     }
   } catch {
     // Best-effort — silently skip if DB unavailable
