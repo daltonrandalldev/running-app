@@ -53,3 +53,24 @@ Pure TypeScript implementation of Jack Daniels' VDOT system. Key exports:
 - `parseTime(str)` — parses `"MM:SS"` or `"H:MM:SS"` to decimal minutes; throws on invalid input
 
 All pace display is in **min/mile** (sec/km × 1.60934). `TRAINING_ZONES` array is the single source of truth for zone names, percentage bounds, and hex colors — used by both the library and `KeyMetricsScreen`.
+
+## Docs
+
+Product and technical design documents live in `docs/` as markdown.
+
+```
+docs/
+├── prd/
+│   ├── full-prd.md              # Full Endurance Performance Analytics PRD
+│   └── section-02-pmc.md        # PRD Section 2 (PMC) + all 7 implementation tickets
+└── tickets/
+    ├── PMC-001-core-calc.md
+    ├── PMC-002-race-detection.md
+    ├── PMC-003-benchmarks.md
+    ├── PMC-004-fitting-engine.md
+    ├── PMC-005-sport-specific.md
+    ├── PMC-006-audit-log.md
+    └── PMC-007-chart-ui.md
+```
+
+When working on PMC features, read `docs/prd/section-02-pmc.md` for full context (PRD requirements + ticket specs), or the individual ticket file for a single ticket.
