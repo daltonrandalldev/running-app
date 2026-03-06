@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, ActivityIndicator, TouchableOpacity, Switch } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { supabase } from '../lib/supabase';
+import { getKRace } from '../lib/raceDetection';
+import { recalculatePMC } from '../lib/pmcRecalc';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActivityDetail'>;
 
@@ -40,6 +42,10 @@ type ActivityDetail = {
   trimp: number | null;
   pace_load_flat: number | null;
   pace_load_gap: number | null;
+  is_race: boolean | null;
+  race_detection_source: 'user' | 'auto' | 'none' | null;
+  k_race_applied: number | null;
+  effective_tss_race: number | null;
 };
 
 function formatDuration(seconds: number) {
@@ -100,6 +106,11 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [favorite, setFavorite] = useState(false);
 
+  // Race detection state (PMC-002)
+  const [isRace, setIsRace] = useState(false);
+  const [kRace, setKRace] = useState(1.0);
+  const [raceSaving, setRaceSaving] = useState(false);
+
   useEffect(() => {
     async function fetchActivity() {
       const { data } = await supabase
@@ -108,7 +119,8 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           'activity_id, name, start_time, sport, moving_time_seconds, elapsed_time_seconds, ' +
           'distance, avg_pace_seconds, avg_speed, calories, avg_hr, max_hr, ascent, descent, ' +
           'avg_cadence, max_cadence, steps, avg_step_length, min_temperature, max_temperature, ' +
-          'start_lat, start_long, active_load, hrss, hr_tss, trimp, pace_load_flat, pace_load_gap'
+          'start_lat, start_long, active_load, hrss, hr_tss, trimp, pace_load_flat, pace_load_gap, ' +
+          'is_race, race_detection_source, k_race_applied, effective_tss_race'
         )
         .eq('activity_id', activityId.toString())
         .single();
@@ -146,7 +158,15 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           trimp: data.trimp,
           pace_load_flat: data.pace_load_flat,
           pace_load_gap: data.pace_load_gap,
+          is_race: data.is_race ?? false,
+          race_detection_source: data.race_detection_source ?? 'none',
+          k_race_applied: data.k_race_applied,
+          effective_tss_race: data.effective_tss_race,
         });
+        // Initialise race UI state from persisted values
+        setIsRace(data.is_race ?? false);
+        const durationHours = ((data.moving_time_seconds ?? data.elapsed_time_seconds) ?? 0) / 3600;
+        setKRace(data.k_race_applied ?? getKRace(durationHours));
       }
       setLoading(false);
     }
@@ -156,6 +176,55 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
   async function toggleFavorite() {
     // garmin_activities does not have is_favorite — toggle is visual only
     setFavorite((prev) => !prev);
+  }
+
+  async function saveRaceSettings() {
+    if (!activity) return;
+    setRaceSaving(true);
+    const durationHours = (activity.duration_seconds ?? 0) / 3600;
+    const k_race_applied = isRace ? kRace : null;
+    const effective_tss_race =
+      isRace && k_race_applied != null && activity.active_load != null
+        ? activity.active_load * k_race_applied
+        : null;
+
+    await supabase
+      .from('garmin_activities')
+      .update({
+        is_race: isRace,
+        race_detection_source: 'user',
+        k_race_applied,
+        effective_tss_race,
+      })
+      .eq('activity_id', activityId.toString());
+
+    // Trigger PMC recalculation from this activity's date onward
+    await recalculatePMC(activity.start_time.slice(0, 10));
+
+    setActivity((prev) =>
+      prev
+        ? { ...prev, is_race: isRace, race_detection_source: 'user', k_race_applied, effective_tss_race }
+        : prev
+    );
+    // Default k_race for next toggle-on, based on duration
+    if (!isRace) setKRace(getKRace(durationHours));
+    setRaceSaving(false);
+  }
+
+  function handleToggleRace(value: boolean) {
+    setIsRace(value);
+    if (value && activity) {
+      // Pre-fill default k_race based on duration when enabling race flag
+      const durationHours = (activity.duration_seconds ?? 0) / 3600;
+      setKRace(getKRace(durationHours));
+    }
+  }
+
+  function adjustKRace(delta: number) {
+    setKRace((prev) => {
+      const next = Math.round((prev + delta) * 10) / 10;
+      return Math.min(3.0, Math.max(1.0, next));
+    });
   }
 
   if (loading) {
@@ -276,6 +345,78 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
             />
           </Section>
         )}
+
+        {/* Race Settings (PMC-002) */}
+        <View className="mb-5">
+          <Text className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
+            Race Settings
+          </Text>
+          <View className="bg-white rounded-xl p-4 border border-gray-100">
+
+            {/* Race toggle row */}
+            <View className="flex-row items-center justify-between mb-1">
+              <View className="flex-1 pr-3">
+                <Text className="text-sm font-semibold text-gray-800">Mark as Race</Text>
+                {activity.race_detection_source === 'auto' && !isRace && (
+                  <Text className="text-xs text-blue-500 mt-0.5">Auto-detected as race</Text>
+                )}
+                {activity.race_detection_source === 'user' && (
+                  <Text className="text-xs text-gray-400 mt-0.5">Manually set</Text>
+                )}
+              </View>
+              <Switch
+                value={isRace}
+                onValueChange={handleToggleRace}
+                trackColor={{ false: '#e5e7eb', true: '#2563eb' }}
+                thumbColor="#ffffff"
+              />
+            </View>
+
+            {/* k_race multiplier — only shown when is_race = true */}
+            {isRace && (
+              <View className="mt-3 pt-3 border-t border-gray-100">
+                <Text className="text-xs text-gray-500 mb-2">
+                  Fatigue Multiplier (k_race) · applies to ATL only
+                </Text>
+                <View className="flex-row items-center gap-3">
+                  <TouchableOpacity
+                    onPress={() => adjustKRace(-0.1)}
+                    className="w-9 h-9 rounded-full bg-gray-100 items-center justify-center"
+                  >
+                    <Text className="text-lg font-bold text-gray-700">−</Text>
+                  </TouchableOpacity>
+                  <View className="flex-1 items-center">
+                    <Text className="text-xl font-bold text-gray-900">{kRace.toFixed(1)}×</Text>
+                    <Text className="text-xs text-gray-400">effective TSS = {
+                      activity.active_load != null
+                        ? (activity.active_load * kRace).toFixed(1)
+                        : '—'
+                    }</Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => adjustKRace(0.1)}
+                    className="w-9 h-9 rounded-full bg-gray-100 items-center justify-center"
+                  >
+                    <Text className="text-lg font-bold text-gray-700">+</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
+            {/* Save button */}
+            <TouchableOpacity
+              onPress={saveRaceSettings}
+              disabled={raceSaving}
+              className="mt-4 rounded-lg py-2.5 items-center"
+              style={{ backgroundColor: raceSaving ? '#93c5fd' : '#2563eb' }}
+            >
+              <Text className="text-white text-sm font-semibold">
+                {raceSaving ? 'Saving…' : 'Save Race Settings'}
+              </Text>
+            </TouchableOpacity>
+
+          </View>
+        </View>
 
         {/* Elevation */}
         <Section title="Elevation">

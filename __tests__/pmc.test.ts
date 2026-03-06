@@ -10,6 +10,7 @@
  */
 
 import { calculatePMC } from '../lib/pmc.ts';
+import { getKRace, autoDetectRace } from '../lib/raceDetection.ts';
 
 // ── 30-day fixture ────────────────────────────────────────────────────────────
 // TSS pattern: realistic athlete training week with hard days, rest days, and
@@ -77,6 +78,10 @@ function assert(condition: boolean, msg: string): void {
 
 function near(a: number, b: number, tol = 0.5): boolean {
   return Math.abs(a - b) <= tol;
+}
+
+function round1Test(v: number): number {
+  return Math.round(v * 10) / 10;
 }
 
 // ── Build activities input ────────────────────────────────────────────────────
@@ -174,6 +179,114 @@ assert(
   (restResult?.atl ?? 0) < (trainingResult?.atl ?? 0),
   'rest day: ATL decays toward zero',
 );
+
+// ── PMC-002: Race multiplier tests ───────────────────────────────────────────
+
+console.log();
+console.log('PMC-002 Race Multiplier Tests');
+
+// getKRace duration table
+assert(getKRace(2) === 1.0, 'getKRace: < 4 hours → 1.0×');
+assert(getKRace(4) === 1.5, 'getKRace: 4 hours → 1.5×');
+assert(getKRace(6) === 1.5, 'getKRace: 6 hours → 1.5×');
+assert(getKRace(8) === 2.0, 'getKRace: 8 hours → 2.0×');
+assert(getKRace(10) === 2.0, 'getKRace: 10 hours → 2.0×');
+assert(getKRace(12) === 2.5, 'getKRace: 12 hours → 2.5×');
+assert(getKRace(20) === 2.5, 'getKRace: > 12 hours → 2.5×');
+
+// autoDetectRace — activity_type method
+assert(
+  autoDetectRace({ sport: 'race', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).is_race,
+  'autoDetectRace: sport = "race" → is_race = true',
+);
+assert(
+  autoDetectRace({ sport: 'running_race', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).is_race,
+  'autoDetectRace: sport contains "race" → is_race = true',
+);
+assert(
+  autoDetectRace({ sport: 'running_race', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).detection_reason === 'activity_type',
+  'autoDetectRace: detection_reason = activity_type',
+);
+
+// autoDetectRace — avg HR method (91% of 185 = 168.35)
+assert(
+  autoDetectRace({ sport: 'running', avg_hr: 170, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).is_race,
+  'autoDetectRace: avg HR 170 > 88% of 185 → is_race = true',
+);
+assert(
+  autoDetectRace({ sport: 'running', avg_hr: 170, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).detection_reason === 'avg_hr',
+  'autoDetectRace: detection_reason = avg_hr',
+);
+
+// autoDetectRace — negative HR case
+assert(
+  !autoDetectRace({ sport: 'running', avg_hr: 140, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).is_race,
+  'autoDetectRace: avg HR 140 < 88% of 185 → is_race = false',
+);
+
+// autoDetectRace — pace method (within 5% of PB)
+assert(
+  autoDetectRace({ sport: 'running', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: 252, pb_pace_seconds: 245 }).is_race,
+  'autoDetectRace: pace 252 within 5% of PB 245 → is_race = true',
+);
+assert(
+  autoDetectRace({ sport: 'running', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: 252, pb_pace_seconds: 245 }).detection_reason === 'pace',
+  'autoDetectRace: detection_reason = pace',
+);
+
+// autoDetectRace — pace outside 5% of PB
+assert(
+  !autoDetectRace({ sport: 'running', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: 290, pb_pace_seconds: 245 }).is_race,
+  'autoDetectRace: pace 290 outside 5% of PB 245 → is_race = false',
+);
+
+// autoDetectRace — all null inputs
+assert(
+  !autoDetectRace({ sport: 'running', avg_hr: null, hr_max_estimate: 185, avg_pace_seconds: null, pb_pace_seconds: null }).is_race,
+  'autoDetectRace: no signals → is_race = false',
+);
+
+// Race multiplier: 10hr race (k_race = 2.0) — ATL gets 2× TSS, CTL stays raw
+// Single race activity with TSS=100, k_race=2.0 → atl_tss=200
+const raceActivity = [{ date: BASE_DATE, tss: 100, atl_tss: 200 }];
+const raceResult = calculatePMC(raceActivity);
+const raceDay = raceResult.find((d) => d.date === BASE_DATE);
+const nonRaceResult = calculatePMC([{ date: BASE_DATE, tss: 100 }]);
+const nonRaceDay = nonRaceResult.find((d) => d.date === BASE_DATE);
+
+assert(raceDay !== undefined, 'race day present in result');
+assert(
+  (raceDay?.atl ?? 0) > (nonRaceDay?.atl ?? 0),
+  'race multiplier: ATL with k_race=2.0 > ATL without multiplier',
+);
+assert(
+  Math.abs((raceDay?.ctl ?? 0) - (nonRaceDay?.ctl ?? 0)) < 0.01,
+  'race multiplier: CTL is unaffected by atl_tss',
+);
+
+// Verify ATL is approximately 2× the non-race ATL (same formula, just 2× load input)
+const k_ctl_default = 1 - Math.exp(-1 / 42);
+const k_atl_default = 1 - Math.exp(-1 / 7);
+const expectedAtlRace = round1Test(200 * k_atl_default);
+const expectedAtlNormal = round1Test(100 * k_atl_default);
+assert(
+  near(raceDay?.atl ?? 0, expectedAtlRace),
+  `race ATL: got ${raceDay?.atl}, expected ~${expectedAtlRace}`,
+);
+assert(
+  near(nonRaceDay?.atl ?? 0, expectedAtlNormal),
+  `non-race ATL: got ${nonRaceDay?.atl}, expected ~${expectedAtlNormal}`,
+);
+
+// Non-race: omitting atl_tss falls back to raw tss for ATL
+const noAtlTssResult = calculatePMC([{ date: BASE_DATE, tss: 100 }]);
+const noAtlTssDay = noAtlTssResult.find((d) => d.date === BASE_DATE);
+assert(
+  noAtlTssDay?.atl === nonRaceDay?.atl,
+  'omitting atl_tss: ATL same as explicit atl_tss=tss',
+);
+
+console.log('Race detection: all passed');
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 

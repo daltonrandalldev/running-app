@@ -15,8 +15,13 @@
 export interface PMCInput {
   /** ISO date string YYYY-MM-DD */
   date: string;
-  /** Training Stress Score for this activity */
+  /** Training Stress Score for this activity (used for CTL) */
   tss: number;
+  /**
+   * Effective TSS for ATL only. Set to tss × k_race_applied for race activities.
+   * When omitted, ATL uses the same value as tss (no race adjustment).
+   */
+  atl_tss?: number;
 }
 
 export interface PMCParams {
@@ -60,10 +65,14 @@ export function calculatePMC(
   const k_ctl = 1 - Math.exp(-1 / tc_fitness);
   const k_atl = 1 - Math.exp(-1 / tc_fatigue);
 
-  // Aggregate TSS by date (multiple activities on same day are summed)
+  // Aggregate TSS by date (multiple activities on same day are summed).
+  // CTL uses raw TSS; ATL uses atl_tss (applies k_race for race activities).
   const tssMap = new Map<string, number>();
+  const atlTssMap = new Map<string, number>();
   for (const act of activities) {
     tssMap.set(act.date, (tssMap.get(act.date) ?? 0) + act.tss);
+    const atlContrib = act.atl_tss ?? act.tss;
+    atlTssMap.set(act.date, (atlTssMap.get(act.date) ?? 0) + atlContrib);
   }
 
   // Determine date range: earliest activity → today
@@ -84,8 +93,9 @@ export function calculatePMC(
     // TSB is form going INTO the day — computed before applying today's load
     const tsb = ctl - atl;
     const load = tssMap.get(dateStr) ?? 0;
+    const atlLoad = atlTssMap.get(dateStr) ?? load;
     ctl = ctl + (load - ctl) * k_ctl;
-    atl = atl + (load - atl) * k_atl;
+    atl = atl + (atlLoad - atl) * k_atl;
     result.push({
       date: dateStr,
       ctl: round1(ctl),
