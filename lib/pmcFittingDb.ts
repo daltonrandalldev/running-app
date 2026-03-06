@@ -18,6 +18,13 @@ import { supabase } from './supabase.ts';
 import { fitDecayConstants, type BenchmarkForFit, type FitDecayResult, type ClampEvent } from './pmcFitting.ts';
 import { recalculatePMC } from './pmcRecalc.ts';
 import type { PMCInput } from './pmc.ts';
+import {
+  generatePlainEnglish,
+  computeCiWidth,
+  buildRefitNotifications,
+} from './pmcAuditUtils.ts';
+
+export { getConfidenceLabel } from './pmcAuditUtils.ts';
 
 /** Placeholder athlete ID used until authentication is implemented. */
 const SINGLE_ATHLETE_ID = '00000000-0000-0000-0000-000000000001';
@@ -28,58 +35,6 @@ const MAX_BACKFILL_DAYS = 365 * 4;
 /** Days between automatic refits (on-app-open cadence). */
 const REFIT_INTERVAL_DAYS = 28;
 
-// ── Plain-English interpretation templates ────────────────────────────────────
-
-/**
- * Generate a human-readable explanation for a parameter change.
- * Used to populate parameter_change_log.plain_english (PMC-006 R1).
- */
-function generatePlainEnglish(
-  paramName: string,
-  oldValue: number | null,
-  newValue: number,
-  wasClamped: boolean,
-  rawValue?: number,
-): string {
-  const prev = oldValue != null ? ` (previously ${Math.round(oldValue)} days)` : '';
-
-  if (wasClamped && rawValue != null) {
-    const bound = rawValue < newValue ? 'minimum' : 'maximum';
-    return (
-      `Your fitted ${paramName === 'tc_fitness' ? 'fitness decay' : 'fatigue decay'} ` +
-      `(${rawValue.toFixed(1)} days) was outside the physiological ${bound}. ` +
-      `Using ${newValue.toFixed(1)} days as the ${bound} bound.`
-    );
-  }
-
-  if (paramName === 'tc_fitness') {
-    const rel =
-      newValue > 42
-        ? 'more slowly than average'
-        : newValue < 42
-          ? 'faster than average'
-          : 'at the typical rate';
-    return (
-      `Your aerobic fitness builds over approximately ${Math.round(newValue)} days${prev}. ` +
-      `This means your body adapts ${rel} to training stimulus.`
-    );
-  }
-
-  if (paramName === 'tc_fatigue') {
-    const rel =
-      newValue < 7
-        ? 'faster-than-average acute fatigue recovery'
-        : newValue > 7
-          ? 'slower-than-average acute fatigue recovery'
-          : 'typical acute fatigue recovery';
-    return (
-      `You recover from hard training in about ${Math.round(newValue)} days${prev}. ` +
-      `This suggests you have ${rel}.`
-    );
-  }
-
-  return `${paramName} updated to ${newValue.toFixed(2)}${prev}.`;
-}
 
 // ── Data fetching ─────────────────────────────────────────────────────────────
 
@@ -192,7 +147,7 @@ async function logParameterChange(
   changeSource: 'auto_fit' | 'clamped',
   result: Extract<FitDecayResult, { tc_fitness: number }>,
   clampEvent?: ClampEvent,
-): Promise<void> {
+): Promise<string> {
   const wasClamped = changeSource === 'clamped';
   const rawValue = clampEvent?.raw_value;
 
@@ -233,6 +188,140 @@ async function logParameterChange(
     was_clamped: wasClamped,
   });
   if (error) throw error;
+  return plainEnglish;
+}
+
+// ── Notification writes (PMC-006 R2–R4) ──────────────────────────────────────
+
+/**
+ * Fire the 'personalization_available' notification the first time an athlete
+ * becomes eligible for fitting. Checks the DB to ensure it fires only once.
+ */
+async function maybeWritePersonalizationNotification(
+  athleteId: string,
+  sport: string,
+): Promise<void> {
+  const { data } = await supabase
+    .from('athlete_notifications')
+    .select('id')
+    .eq('athlete_id', athleteId)
+    .eq('sport', sport)
+    .eq('type', 'personalization_available')
+    .limit(1);
+
+  if (data && data.length > 0) return; // already sent
+
+  const { error } = await supabase.from('athlete_notifications').insert({
+    athlete_id: athleteId,
+    sport,
+    type: 'personalization_available',
+    message:
+      'You now have enough data to personalize your training model. Tap to enable.',
+  });
+  if (error) throw error;
+}
+
+/**
+ * Write 'model_updated' (R3) and, when R² < 0.6, 'more_data_needed' (R4)
+ * notifications after a successful refit.
+ *
+ * ci_width (tc_fitness_high − tc_fitness_low) is stored as raw data alongside
+ * the derived confidence_label so thresholds can be tightened later without a
+ * schema change.
+ */
+async function writeRefitNotifications(
+  athleteId: string,
+  sport: string,
+  result: Extract<FitDecayResult, { tc_fitness: number }>,
+  changedParamMessages: string[],
+): Promise<void> {
+  const ciWidth = result.ci.tc_fitness_high - result.ci.tc_fitness_low;
+  const notifications = buildRefitNotifications(result.r2, ciWidth, changedParamMessages);
+
+  for (const n of notifications) {
+    const { error } = await supabase.from('athlete_notifications').insert({
+      athlete_id: athleteId,
+      sport,
+      type: n.type,
+      message: n.message,
+      r_squared: result.r2,
+      confidence_label: n.confidence_label,
+      ci_width: n.ci_width,
+    });
+    if (error) throw error;
+  }
+}
+
+// ── Notification queries (PMC-006 R2–R3) ─────────────────────────────────────
+
+export interface AthleteNotification {
+  id: string;
+  sport: string;
+  type: string;
+  message: string;
+  r_squared: number | null;
+  confidence_label: string | null;
+  /** Raw tc_fitness CI width (days). Use this to re-derive the label if thresholds change. */
+  ci_width: number | null;
+  is_read: boolean;
+  created_at: string;
+}
+
+/** Return all unread notifications for an athlete, newest first. */
+export async function getUnreadNotifications(
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<AthleteNotification[]> {
+  const { data, error } = await supabase
+    .from('athlete_notifications')
+    .select('id, sport, type, message, r_squared, confidence_label, ci_width, is_read, created_at')
+    .eq('athlete_id', athleteId)
+    .eq('is_read', false)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as AthleteNotification[];
+}
+
+// ── Parameter history query (PMC-006 R5) ─────────────────────────────────────
+
+export interface ParameterHistoryRow {
+  id: string;
+  sport: string;
+  parameter_name: string;
+  old_value: number | null;
+  new_value: number;
+  change_source: string | null;
+  r_squared: number | null;
+  n_data_points: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  /** Computed from ci_high − ci_low. Null when either bound is absent. */
+  ci_width: number | null;
+  plain_english: string;
+  was_clamped: boolean;
+  created_at: string;
+}
+
+/**
+ * Return the full parameter change history for an athlete, newest first (R5).
+ * Equivalent to: GET /athletes/:id/parameter-history
+ */
+export async function getParameterHistory(
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<ParameterHistoryRow[]> {
+  const { data, error } = await supabase
+    .from('parameter_change_log')
+    .select(
+      'id, sport, parameter_name, old_value, new_value, change_source, ' +
+      'r_squared, n_data_points, ci_low, ci_high, plain_english, was_clamped, created_at',
+    )
+    .eq('athlete_id', athleteId)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+
+  return (data ?? []).map((row: any) => ({
+    ...row,
+    ci_width: computeCiWidth(row.ci_low, row.ci_high),
+  })) as ParameterHistoryRow[];
 }
 
 // ── Current param_version for benchmark tagging ───────────────────────────────
@@ -295,7 +384,7 @@ export async function runFitting(
     const fittedAt = new Date().toISOString();
     await upsertAthleteParameters(athleteId, sport, result, fittedAt);
 
-    // Log tc_fitness change if it differs from previous value
+    // Log tc_fitness / tc_fatigue changes; collect plain-English strings for notifications
     const prevTcf = prevParams?.tc_fitness ?? null;
     const prevTca = prevParams?.tc_fatigue ?? null;
 
@@ -304,12 +393,14 @@ export async function runFitting(
       result.clamp_events.map((e) => e.parameter),
     );
 
+    const changedParamMessages: string[] = [];
+
     const tcfChanged = prevTcf === null || Math.abs(result.tc_fitness - prevTcf) > 0.05;
     if (tcfChanged) {
       const clampEvent = result.clamp_events.find(
         (e) => e.parameter === 'tc_fitness',
       );
-      await logParameterChange(
+      const msg = await logParameterChange(
         athleteId,
         sport,
         'tc_fitness',
@@ -319,6 +410,7 @@ export async function runFitting(
         result,
         clampEvent,
       );
+      changedParamMessages.push(msg);
     }
 
     const tcaChanged = prevTca === null || Math.abs(result.tc_fatigue - prevTca) > 0.05;
@@ -326,7 +418,7 @@ export async function runFitting(
       const clampEvent = result.clamp_events.find(
         (e) => e.parameter === 'tc_fatigue',
       );
-      await logParameterChange(
+      const msg = await logParameterChange(
         athleteId,
         sport,
         'tc_fatigue',
@@ -336,7 +428,12 @@ export async function runFitting(
         result,
         clampEvent,
       );
+      changedParamMessages.push(msg);
     }
+
+    // PMC-006: notifications — R2 (show-once eligibility) then R3/R4 (post-refit)
+    await maybeWritePersonalizationNotification(athleteId, sport);
+    await writeRefitNotifications(athleteId, sport, result, changedParamMessages);
 
     // R7: Recalculate PMC from earliest benchmark date using new params
     if (benchmarks.length > 0) {
@@ -371,28 +468,43 @@ export function triggerRefitAsync(
 /**
  * On-app-open monthly refit check (Gap 1 — Option B).
  *
- * Runs a refit if athlete_parameters has no fitted_at, or if the last fit
- * was more than REFIT_INTERVAL_DAYS ago. Does not block the UI — await this
- * in a useEffect with no loading state shown to the user.
+ * Checks all three sport series ('run', 'cycle', 'combined') independently.
+ * Triggers a refit for any sport that has never been fitted or whose last fit
+ * was more than REFIT_INTERVAL_DAYS ago. Each sport's staleness is evaluated
+ * in parallel — a stale 'run' refit never blocks or skips 'cycle'.
+ *
+ * Does not block the UI — await this in a useEffect with no loading state.
  */
 export async function maybeRefitOnAppOpen(
   athleteId: string = SINGLE_ATHLETE_ID,
 ): Promise<void> {
   try {
-    const params = await fetchCurrentParams(athleteId, 'combined');
+    const [runParams, cycleParams, combinedParams] = await Promise.all([
+      fetchCurrentParams(athleteId, 'run'),
+      fetchCurrentParams(athleteId, 'cycle'),
+      fetchCurrentParams(athleteId, 'combined'),
+    ]);
 
-    if (!params?.fitted_at) {
-      // Never been fitted — try now (will no-op if not yet eligible)
-      triggerRefitAsync(athleteId, 'combined');
-      return;
-    }
+    const checks = [
+      { sport: 'run', params: runParams },
+      { sport: 'cycle', params: cycleParams },
+      { sport: 'combined', params: combinedParams },
+    ] as const;
 
-    const lastFit = new Date(params.fitted_at);
-    const daysSince =
-      (Date.now() - lastFit.getTime()) / (1000 * 60 * 60 * 24);
+    for (const { sport, params } of checks) {
+      if (!params?.fitted_at) {
+        // Never been fitted — try now (will no-op if not yet eligible)
+        triggerRefitAsync(athleteId, sport);
+        continue;
+      }
 
-    if (daysSince >= REFIT_INTERVAL_DAYS) {
-      triggerRefitAsync(athleteId, 'combined');
+      const lastFit = new Date(params.fitted_at);
+      const daysSince =
+        (Date.now() - lastFit.getTime()) / (1000 * 60 * 60 * 24);
+
+      if (daysSince >= REFIT_INTERVAL_DAYS) {
+        triggerRefitAsync(athleteId, sport);
+      }
     }
   } catch {
     // Best-effort — silently skip if DB unavailable

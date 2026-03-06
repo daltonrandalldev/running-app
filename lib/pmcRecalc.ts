@@ -14,6 +14,13 @@
  *     effective_tss_race back to garmin_activities.
  *   - recalculatePMC now reads is_race and k_race_applied, passing atl_tss to
  *     calculatePMC so ATL reflects race fatigue multipliers while CTL stays raw.
+ *
+ * PMC-005 additions:
+ *   - Three PMC series per athlete: 'run', 'cycle', 'combined'.
+ *   - Combined series uses sport-weighted TSS: run × W_RUN + cycle × W_CYCLE.
+ *     Race k-factor is applied before sport weight (effort property first).
+ *   - recalculateAllSports() orchestrates all three series in parallel,
+ *     fetching per-sport fitted params from athlete_parameters.
  */
 
 import { supabase } from './supabase';
@@ -25,6 +32,22 @@ const SINGLE_ATHLETE_ID = '00000000-0000-0000-0000-000000000001';
 
 /** Maximum days to backfill on first import (4 years). */
 const MAX_BACKFILL_DAYS = 365 * 4;
+
+/** Placeholder sport TSS weights for the combined PMC series (see PRD Section 14). */
+const W_RUN = 1.0;
+const W_CYCLE = 0.5;
+
+/**
+ * Returns the TSS weight for a sport in the combined PMC series.
+ * Running → W_RUN (1.0), cycling → W_CYCLE (0.5), all others → 1.0.
+ * Case-insensitive. Exported for testing.
+ */
+export function sportWeight(sport: string | null): number {
+  const s = (sport ?? '').toLowerCase();
+  if (s.includes('run')) return W_RUN;
+  if (s.includes('cycl')) return W_CYCLE;
+  return 1.0;
+}
 
 export interface RecalcResult {
   ok: boolean;
@@ -150,40 +173,75 @@ export async function recalculatePMC(
     // Determine the earliest date to fetch activities from
     const cutoff = fromDate ?? earliestAllowedDate();
 
-    // Fetch activities with an active_load from the cutoff date onward.
-    // Also fetch is_race and k_race_applied for PMC-002 race fatigue multiplier.
-    let query = supabase
-      .from('garmin_activities')
-      .select('start_time, active_load, is_race, k_race_applied')
-      .not('active_load', 'is', null)
-      .gte('start_time', cutoff)
-      .order('start_time', { ascending: true });
+    let activities: Array<{ date: string; tss: number; atl_tss?: number }>;
 
-    // Sport filtering: 'combined' includes all sports, otherwise filter by type
-    if (sport !== 'combined') {
-      query = query.ilike('sport', `%${sport}%`);
+    if (sport === 'combined') {
+      // Fetch all activities with sport field to apply per-sport TSS weights.
+      // Formula: combined_TSS = (tss × k_race) × w_sport
+      // Race k-factor is applied first (property of the effort), then sport
+      // weight (property of how the effort contributes to the combined model).
+      const { data, error } = await supabase
+        .from('garmin_activities')
+        .select('start_time, active_load, is_race, k_race_applied, sport')
+        .not('active_load', 'is', null)
+        .gte('start_time', cutoff)
+        .order('start_time', { ascending: true });
+
+      if (error) throw error;
+
+      activities = (data ?? []).map(
+        (row: {
+          start_time: string;
+          active_load: number;
+          is_race: boolean | null;
+          k_race_applied: number | null;
+          sport: string | null;
+        }) => {
+          const w = sportWeight(row.sport);
+          const rawTss = row.active_load;
+          const raceAtlTss =
+            row.is_race && row.k_race_applied != null
+              ? rawTss * row.k_race_applied * w
+              : undefined;
+          return {
+            date: row.start_time.slice(0, 10),
+            tss: rawTss * w,
+            atl_tss: raceAtlTss,
+          };
+        },
+      );
+    } else {
+      // Sport-specific: filter by sport, use raw (race-adjusted) TSS, no sport weight.
+      const { data, error } = await supabase
+        .from('garmin_activities')
+        .select('start_time, active_load, is_race, k_race_applied')
+        .not('active_load', 'is', null)
+        .gte('start_time', cutoff)
+        .ilike('sport', `%${sport}%`)
+        .order('start_time', { ascending: true });
+
+      if (error) throw error;
+
+      activities = (data ?? []).map(
+        (row: {
+          start_time: string;
+          active_load: number;
+          is_race: boolean | null;
+          k_race_applied: number | null;
+        }) => {
+          const rawTss = row.active_load;
+          const atl_tss =
+            row.is_race && row.k_race_applied != null
+              ? rawTss * row.k_race_applied
+              : undefined;
+          return {
+            date: row.start_time.slice(0, 10),
+            tss: rawTss,
+            atl_tss,
+          };
+        },
+      );
     }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    // Map activities to PMC input format.
-    // CTL uses raw active_load. ATL uses effective_tss (active_load × k_race_applied)
-    // for race activities; raw active_load otherwise.
-    const activities = (data ?? []).map(
-      (row: { start_time: string; active_load: number; is_race: boolean | null; k_race_applied: number | null }) => {
-        const rawTss = row.active_load;
-        const atl_tss =
-          row.is_race && row.k_race_applied != null
-            ? rawTss * row.k_race_applied
-            : undefined;
-        return {
-          date: row.start_time.slice(0, 10),
-          tss: rawTss,
-          atl_tss,
-        };
-      }
-    );
 
     const pmcDays = calculatePMC(activities, { tc_fitness, tc_fatigue });
 
@@ -223,4 +281,55 @@ function earliestAllowedDate(): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - MAX_BACKFILL_DAYS);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Fetch fitted time constants for one sport from athlete_parameters.
+ * Returns 42/7 defaults if no row exists for this sport yet.
+ */
+async function fetchSportParams(sport: string): Promise<PMCParams> {
+  const { data } = await supabase
+    .from('athlete_parameters')
+    .select('tc_fitness, tc_fatigue')
+    .eq('athlete_id', SINGLE_ATHLETE_ID)
+    .eq('sport', sport)
+    .maybeSingle();
+
+  return {
+    tc_fitness: data?.tc_fitness ?? 42,
+    tc_fatigue: data?.tc_fatigue ?? 7,
+  };
+}
+
+export interface RecalcAllResult {
+  run: RecalcResult;
+  cycle: RecalcResult;
+  combined: RecalcResult;
+}
+
+/**
+ * Recalculate all three PMC sport series ('run', 'cycle', 'combined') in parallel.
+ *
+ * Reads fitted time constants for each sport from athlete_parameters (falls
+ * back to 42/7 defaults if not yet personalized). Results are written to
+ * daily_pmc_values with the respective sport label.
+ *
+ * @param fromDate  ISO date from which to recalculate. Omit for full backfill.
+ */
+export async function recalculateAllSports(
+  fromDate?: string,
+): Promise<RecalcAllResult> {
+  const [runParams, cycleParams, combinedParams] = await Promise.all([
+    fetchSportParams('run'),
+    fetchSportParams('cycle'),
+    fetchSportParams('combined'),
+  ]);
+
+  const [run, cycle, combined] = await Promise.all([
+    recalculatePMC(fromDate, 'run', runParams),
+    recalculatePMC(fromDate, 'cycle', cycleParams),
+    recalculatePMC(fromDate, 'combined', combinedParams),
+  ]);
+
+  return { run, cycle, combined };
 }
