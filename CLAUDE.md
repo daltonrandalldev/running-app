@@ -10,7 +10,7 @@ npx expo start --ios    # Open in iOS simulator
 npx expo start --android
 ```
 
-There are no lint or test scripts configured.
+Run `npm test` to execute the PMC regression suite (Node 22+ required).
 
 ## Architecture
 
@@ -64,7 +64,7 @@ docs/
 │   ├── full-prd.md              # Full Endurance Performance Analytics PRD
 │   └── section-02-pmc.md        # PRD Section 2 (PMC) + all 7 implementation tickets
 └── tickets/
-    ├── PMC-001-core-calc.md
+    ├── PMC-001-core-calc.md     ✅ COMPLETE
     ├── PMC-002-race-detection.md
     ├── PMC-003-benchmarks.md
     ├── PMC-004-fitting-engine.md
@@ -74,3 +74,11 @@ docs/
 ```
 
 When working on PMC features, read `docs/prd/section-02-pmc.md` for full context (PRD requirements + ticket specs), or the individual ticket file for a single ticket.
+
+### PMC Library (`lib/pmc.ts`, `lib/pmcRecalc.ts`)
+
+PMC-001 complete. Key exports:
+- `calculatePMC(activities[], params?)` — pure function; accepts `{date, tss}[]`, returns `{date, ctl, atl, tsb}[]` for every day from earliest activity to today. Defaults tc_fitness=42, tc_fatigue=7.
+- `recalculatePMC(fromDate?, sport?, params?)` — reads `garmin_activities.active_load`, calls calculatePMC, upserts into `daily_pmc_values`. Call after any sync.
+
+Schema migration for `daily_pmc_values` is in `sql/daily_pmc_values.sql` — run once in Supabase SQL editor before using `recalculatePMC`. Upsert key: `(athlete_id, date, sport)`.
