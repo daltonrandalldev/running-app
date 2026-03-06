@@ -1,11 +1,18 @@
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, ActivityIndicator, TouchableOpacity, Switch } from 'react-native';
+import { View, Text, ScrollView, ActivityIndicator, TouchableOpacity, Switch, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../App';
 import { supabase } from '../lib/supabase';
 import { getKRace } from '../lib/raceDetection';
 import { recalculatePMC } from '../lib/pmcRecalc';
+import {
+  calculatePerformanceScore,
+  getBenchmarkForActivity,
+  saveBenchmarkEffort,
+  removeBenchmarkEffort,
+  type BenchmarkEffort,
+} from '../lib/benchmarkEfforts';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActivityDetail'>;
 
@@ -111,6 +118,14 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
   const [kRace, setKRace] = useState(1.0);
   const [raceSaving, setRaceSaving] = useState(false);
 
+  // Benchmark effort state (PMC-003)
+  const [isBenchmark, setIsBenchmark] = useState(false);
+  const [existingBenchmark, setExistingBenchmark] = useState<BenchmarkEffort | null>(null);
+  const [autoScore, setAutoScore] = useState<number | null>(null);
+  const [manualScoreText, setManualScoreText] = useState('');
+  const [benchmarkNotes, setBenchmarkNotes] = useState('');
+  const [benchmarkSaving, setBenchmarkSaving] = useState(false);
+
   useEffect(() => {
     async function fetchActivity() {
       const { data } = await supabase
@@ -167,6 +182,25 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
         setIsRace(data.is_race ?? false);
         const durationHours = ((data.moving_time_seconds ?? data.elapsed_time_seconds) ?? 0) / 3600;
         setKRace(data.k_race_applied ?? getKRace(durationHours));
+
+        // Initialise benchmark state
+        const computed = calculatePerformanceScore(
+          data.sport,
+          data.distance,
+          data.moving_time_seconds ?? data.elapsed_time_seconds,
+        );
+        setAutoScore(computed);
+
+        const benchmark = await getBenchmarkForActivity(activityId.toString());
+        if (benchmark) {
+          setExistingBenchmark(benchmark);
+          setIsBenchmark(true);
+          setBenchmarkNotes(benchmark.notes ?? '');
+          // If auto-score differs from stored score, show stored score in manual field
+          if (computed == null) {
+            setManualScoreText(String(benchmark.performance_score));
+          }
+        }
       }
       setLoading(false);
     }
@@ -225,6 +259,50 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
       const next = Math.round((prev + delta) * 10) / 10;
       return Math.min(3.0, Math.max(1.0, next));
     });
+  }
+
+  async function saveBenchmarkSettings() {
+    if (!activity) return;
+    setBenchmarkSaving(true);
+
+    if (!isBenchmark) {
+      // User toggled OFF — remove the benchmark row if it exists
+      if (existingBenchmark) {
+        await removeBenchmarkEffort(activityId.toString());
+        setExistingBenchmark(null);
+      }
+      setBenchmarkSaving(false);
+      return;
+    }
+
+    // Determine performance score: auto-calculated or manually entered
+    const score = autoScore ?? parseFloat(manualScoreText);
+    if (!isFinite(score) || score <= 0) {
+      setBenchmarkSaving(false);
+      return;
+    }
+
+    const result = await saveBenchmarkEffort({
+      activity_id: activityId.toString(),
+      date: activity.start_time.slice(0, 10),
+      sport: activity.activity_type ?? 'unknown',
+      duration_seconds: activity.duration_seconds ?? 0,
+      performance_score: score,
+      effort_level: 'user_confirmed',
+      notes: benchmarkNotes.trim() || undefined,
+    });
+
+    if (result.ok && result.data) {
+      setExistingBenchmark(result.data);
+    }
+    setBenchmarkSaving(false);
+  }
+
+  function handleToggleBenchmark(value: boolean) {
+    setIsBenchmark(value);
+    if (value && autoScore == null && existingBenchmark == null) {
+      setManualScoreText('');
+    }
   }
 
   if (loading) {
@@ -412,6 +490,115 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
             >
               <Text className="text-white text-sm font-semibold">
                 {raceSaving ? 'Saving…' : 'Save Race Settings'}
+              </Text>
+            </TouchableOpacity>
+
+          </View>
+        </View>
+
+        {/* Benchmark Effort (PMC-003) */}
+        <View className="mb-5">
+          <Text className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">
+            Benchmark Effort
+          </Text>
+          <View className="bg-white rounded-xl p-4 border border-gray-100">
+
+            {/* Toggle row */}
+            <View className="flex-row items-center justify-between mb-1">
+              <View className="flex-1 pr-3">
+                <Text className="text-sm font-semibold text-gray-800">Mark as Benchmark Effort</Text>
+                {existingBenchmark?.effort_level === 'auto_detected' && (
+                  <Text className="text-xs text-blue-500 mt-0.5">Auto-detected</Text>
+                )}
+                {existingBenchmark?.effort_level === 'user_confirmed' && (
+                  <Text className="text-xs text-gray-400 mt-0.5">User confirmed</Text>
+                )}
+              </View>
+              <Switch
+                value={isBenchmark}
+                onValueChange={handleToggleBenchmark}
+                trackColor={{ false: '#e5e7eb', true: '#2563eb' }}
+                thumbColor="#ffffff"
+              />
+            </View>
+
+            {isBenchmark && (
+              <View className="mt-3 pt-3 border-t border-gray-100">
+
+                {/* Performance score */}
+                {autoScore != null ? (
+                  <View className="mb-3">
+                    <Text className="text-xs text-gray-500 mb-1">Performance Score (VDOT)</Text>
+                    <Text className="text-2xl font-bold text-gray-900">{autoScore.toFixed(1)}</Text>
+                    <Text className="text-xs text-gray-400 mt-0.5">
+                      Auto-calculated · higher is better · comparable across distances
+                    </Text>
+                  </View>
+                ) : (
+                  <View className="mb-3">
+                    <Text className="text-xs text-gray-500 mb-1">Performance Score (required)</Text>
+                    <TextInput
+                      className="border border-gray-200 rounded-lg px-3 py-2 text-base text-gray-900 bg-gray-50"
+                      value={manualScoreText}
+                      onChangeText={setManualScoreText}
+                      keyboardType="decimal-pad"
+                      placeholder="e.g. 4.5 for cycling (watts/kg)"
+                      placeholderTextColor="#9ca3af"
+                    />
+                    <Text className="text-xs text-gray-400 mt-1">
+                      Running: VDOT · Cycling: normalized power (W/kg) · must be consistent across efforts
+                    </Text>
+                  </View>
+                )}
+
+                {/* CTL / ATL snapshot */}
+                {existingBenchmark && (existingBenchmark.ctl_on_date != null || existingBenchmark.atl_on_date != null) && (
+                  <View className="flex-row gap-4 mb-3">
+                    <View>
+                      <Text className="text-xs text-gray-500">CTL on date</Text>
+                      <Text className="text-sm font-semibold text-gray-800">
+                        {existingBenchmark.ctl_on_date?.toFixed(1) ?? '—'}
+                      </Text>
+                    </View>
+                    <View>
+                      <Text className="text-xs text-gray-500">ATL on date</Text>
+                      <Text className="text-sm font-semibold text-gray-800">
+                        {existingBenchmark.atl_on_date?.toFixed(1) ?? '—'}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* Notes */}
+                <View className="mb-1">
+                  <Text className="text-xs text-gray-500 mb-1">Notes (optional)</Text>
+                  <TextInput
+                    className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-gray-50"
+                    value={benchmarkNotes}
+                    onChangeText={setBenchmarkNotes}
+                    placeholder="e.g. A race, 20-min FTP test, all-out interval"
+                    placeholderTextColor="#9ca3af"
+                    multiline
+                    numberOfLines={2}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Save button */}
+            <TouchableOpacity
+              onPress={saveBenchmarkSettings}
+              disabled={benchmarkSaving || (isBenchmark && autoScore == null && manualScoreText.trim() === '')}
+              className="mt-4 rounded-lg py-2.5 items-center"
+              style={{
+                backgroundColor:
+                  benchmarkSaving || (isBenchmark && autoScore == null && manualScoreText.trim() === '')
+                    ? '#93c5fd'
+                    : '#2563eb',
+              }}
+            >
+              <Text className="text-white text-sm font-semibold">
+                {benchmarkSaving ? 'Saving…' : 'Save Benchmark Settings'}
               </Text>
             </TouchableOpacity>
 

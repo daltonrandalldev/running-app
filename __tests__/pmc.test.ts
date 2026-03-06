@@ -11,6 +11,11 @@
 
 import { calculatePMC } from '../lib/pmc.ts';
 import { getKRace, autoDetectRace } from '../lib/raceDetection.ts';
+import {
+  calculatePerformanceScore,
+  checkBenchmarkCriteria,
+  computeFittingEligibility,
+} from '../lib/benchmarkUtils.ts';
 
 // ── 30-day fixture ────────────────────────────────────────────────────────────
 // TSS pattern: realistic athlete training week with hard days, rest days, and
@@ -287,6 +292,166 @@ assert(
 );
 
 console.log('Race detection: all passed');
+
+// ── PMC-003: Benchmark Effort System tests ────────────────────────────────────
+
+console.log();
+console.log('PMC-003 Benchmark Effort Tests');
+
+// checkBenchmarkCriteria — AND logic (both conditions must be true)
+
+// Both conditions met → qualifies
+assert(
+  checkBenchmarkCriteria(175, 185, 252, 245),
+  'checkBenchmarkCriteria: HR 175 > 90% of 185 AND pace 252 ≤ PB 245 × 1.05 → true',
+);
+
+// HR high enough but pace outside 5% of PB → does not qualify
+assert(
+  !checkBenchmarkCriteria(175, 185, 290, 245),
+  'checkBenchmarkCriteria: HR ok but pace 290 outside 5% of PB 245 → false',
+);
+
+// Pace within 5% but HR below 90% HRmax → does not qualify
+assert(
+  !checkBenchmarkCriteria(150, 185, 252, 245),
+  'checkBenchmarkCriteria: pace ok but HR 150 < 90% of 185 → false',
+);
+
+// HR at exactly 90% threshold (not strictly greater) → does not qualify
+assert(
+  !checkBenchmarkCriteria(166.5, 185, 252, 245),
+  'checkBenchmarkCriteria: avg HR = exactly 90% HRmax → false (must be strictly greater)',
+);
+
+// Null avg_hr → does not qualify
+assert(
+  !checkBenchmarkCriteria(null, 185, 252, 245),
+  'checkBenchmarkCriteria: null avg_hr → false',
+);
+
+// Null pbPaceSeconds → does not qualify (can't verify pace criterion)
+assert(
+  !checkBenchmarkCriteria(175, 185, 252, null),
+  'checkBenchmarkCriteria: null pbPaceSeconds → false',
+);
+
+// Both null → does not qualify
+assert(
+  !checkBenchmarkCriteria(null, 185, null, null),
+  'checkBenchmarkCriteria: all null → false',
+);
+
+// calculatePerformanceScore — running uses VDOT
+
+// 5K in 20:00 → VDOT ~47.5 (reasonable range check)
+const score5k = calculatePerformanceScore('running', 5000, 20 * 60);
+assert(score5k !== null, 'calculatePerformanceScore: 5K in 20 min → non-null');
+assert(
+  (score5k ?? 0) >= 40 && (score5k ?? 0) <= 60,
+  `calculatePerformanceScore: 5K in 20 min → VDOT in [40, 60], got ${score5k}`,
+);
+
+// 10K in 40:00 → similar VDOT to 5K in 20 min (Riegel equivalence)
+const score10k = calculatePerformanceScore('running', 10000, 40 * 60);
+assert(score10k !== null, 'calculatePerformanceScore: 10K in 40 min → non-null');
+assert(
+  score5k !== null && score10k !== null && Math.abs(score5k - score10k) < 3,
+  `calculatePerformanceScore: 5K 20min and 10K 40min should yield similar VDOT (±3), got ${score5k} vs ${score10k}`,
+);
+
+// Faster athlete → higher score
+const scoreFast = calculatePerformanceScore('running', 5000, 15 * 60);
+const scoreSlow = calculatePerformanceScore('running', 5000, 25 * 60);
+assert(
+  (scoreFast ?? 0) > (scoreSlow ?? 0),
+  'calculatePerformanceScore: faster 5K time → higher VDOT score',
+);
+
+// Cycling → null (cannot auto-calculate without NP + weight)
+assert(
+  calculatePerformanceScore('cycling', 50000, 3600) === null,
+  'calculatePerformanceScore: cycling → null',
+);
+
+// Other sport → null
+assert(
+  calculatePerformanceScore('swimming', 1500, 1200) === null,
+  'calculatePerformanceScore: swimming → null',
+);
+
+// Null distance → null
+assert(
+  calculatePerformanceScore('running', null, 1200) === null,
+  'calculatePerformanceScore: null distance → null',
+);
+
+// Null duration → null
+assert(
+  calculatePerformanceScore('running', 5000, null) === null,
+  'calculatePerformanceScore: null duration → null',
+);
+
+// computeFittingEligibility — minimum data gate
+
+// Empty → not eligible
+const emptyElig = computeFittingEligibility([]);
+assert(!emptyElig.eligible, 'computeFittingEligibility: empty → not eligible');
+assert(emptyElig.count === 0, 'computeFittingEligibility: empty → count = 0');
+assert(emptyElig.needed === 6, 'computeFittingEligibility: needed = 6');
+
+// 5 benchmarks over 12 months → not eligible (count < 6)
+const fiveDates = [
+  '2023-01-15', '2023-03-10', '2023-06-01',
+  '2023-09-20', '2024-01-15',
+];
+const fiveElig = computeFittingEligibility(fiveDates);
+assert(!fiveElig.eligible, 'computeFittingEligibility: 5 benchmarks → not eligible');
+assert(fiveElig.count === 5, 'computeFittingEligibility: 5 benchmarks → count = 5');
+assert(fiveElig.months_span > 6, 'computeFittingEligibility: 5 benchmarks → months_span > 6');
+
+// 6 benchmarks over only 3 months → not eligible (span < 6 months)
+const sixShortDates = [
+  '2024-01-01', '2024-01-15', '2024-02-01',
+  '2024-02-15', '2024-03-01', '2024-03-15',
+];
+const sixShortElig = computeFittingEligibility(sixShortDates);
+assert(!sixShortElig.eligible, 'computeFittingEligibility: 6 benchmarks over 3 months → not eligible');
+assert(sixShortElig.count === 6, 'computeFittingEligibility: 6 benchmarks → count = 6');
+assert(sixShortElig.months_span < 6, 'computeFittingEligibility: 3-month span → months_span < 6');
+
+// 6 benchmarks over 8 months → eligible
+const sixGoodDates = [
+  '2023-01-10', '2023-03-05', '2023-05-20',
+  '2023-07-15', '2023-09-01', '2023-09-10',
+];
+const sixGoodElig = computeFittingEligibility(sixGoodDates);
+assert(sixGoodElig.eligible, 'computeFittingEligibility: 6 benchmarks over 8 months → eligible');
+assert(sixGoodElig.count === 6, 'computeFittingEligibility: 6 benchmarks → count = 6');
+assert(sixGoodElig.months_span >= 6, 'computeFittingEligibility: 8-month span → months_span >= 6');
+
+// 10 benchmarks over 18 months → eligible, returns correct shape
+const tenDates = [
+  '2022-01-01', '2022-04-01', '2022-07-01', '2022-10-01',
+  '2023-01-01', '2023-04-01', '2023-07-01', '2023-10-01',
+  '2024-01-01', '2024-04-01',
+];
+const tenElig = computeFittingEligibility(tenDates);
+assert(tenElig.eligible, 'computeFittingEligibility: 10 benchmarks over 27 months → eligible');
+assert(tenElig.count === 10, 'computeFittingEligibility: 10 benchmarks → count = 10');
+assert(tenElig.months_span > 24, 'computeFittingEligibility: 27-month span → months_span > 24');
+assert(tenElig.needed === 6, 'computeFittingEligibility: needed always = 6');
+
+// Unsorted input → same result as sorted input (order should not matter)
+const unsortedDates = [...sixGoodDates].reverse();
+const unsortedElig = computeFittingEligibility(unsortedDates);
+assert(
+  unsortedElig.eligible === sixGoodElig.eligible &&
+    unsortedElig.count === sixGoodElig.count,
+  'computeFittingEligibility: unsorted input → same result as sorted',
+);
+
+console.log('Benchmark effort: all passed');
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 
