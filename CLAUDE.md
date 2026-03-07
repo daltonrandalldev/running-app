@@ -61,7 +61,7 @@ Product and technical design documents live in `docs/` as markdown.
 ```
 docs/
 ├── prd/
-│   ├── full-prd.md              # Full Endurance Performance Analytics PRD
+│   ├── prd.md              # Full Endurance Performance Analytics PRD
 │   └── section-02-pmc.md        # PRD Section 2 (PMC) + all 7 implementation tickets
 └── tickets/
     ├── PMC-001-core-calc.md     ✅ COMPLETE
@@ -98,7 +98,7 @@ Trigger with `/prd-section <N>` to run the full PRD-to-code pipeline for a secti
 ```
 docs/
   prd/
-    full-prd.md                       # Source of truth — only TPM agent may write to this
+    prd.md                       # Source of truth — only TPM agent may write to this
   output/
     section-N-tech-design.md          # Output of Staff Engineer Lead
     section-N-ticket-prompts.md       # Output of Prompt Engineer
@@ -139,7 +139,7 @@ All pipeline output files use the `section-N-` naming prefix. Section number com
 <Why this decision was made>
 
 **Impact:**
-- PRD: <what changed in full-prd.md, or "none">
+- PRD: <what changed in prd.md, or "none">
 - TDD: <what changed in section-N-tech-design.md, or "none">
 ```
 
@@ -148,7 +148,7 @@ All pipeline output files use the `section-N-` naming prefix. Section number com
 | Agent | Model | Phase | Write Access |
 |---|---|---|---|
 | Program Manager | (main session) | Both | Orchestration only |
-| TPM Agent | claude-sonnet-4-6 | Both | docs/prd/full-prd.md, docs/agent-decision-log.md |
+| TPM Agent | claude-sonnet-4-6 | Both | docs/prd/prd.md, docs/agent-decision-log.md |
 | Staff Engineer Lead | claude-opus-4-6 | Both | docs/output/, src/, docs/agent-decision-log.md |
 | Staff Engineer 2 | gemini-2.5-pro (external) | Both | None (review only) |
 | Prompt Engineer | claude-sonnet-4-6 | Phase 1 | docs/output/ |
@@ -179,7 +179,7 @@ bash .claude/scripts/call-gemini.sh "gemini-2.5-flash" "<prompt>" # Tiebreaker
 If any agent output contains `[PRODUCT_QUESTION: <question>]`:
 1. Pause the current workflow step immediately
 2. Invoke TPM Agent with the question and full current context
-3. TPM Agent resolves, logs the decision to `docs/prd/full-prd.md`, and appends an entry to `docs/agent-decision-log.md`
+3. TPM Agent resolves, logs the decision to `docs/prd/prd.md`, and appends an entry to `docs/agent-decision-log.md`
 4. Resume the paused step with the answer
 
 ### Context Clearing Rules
