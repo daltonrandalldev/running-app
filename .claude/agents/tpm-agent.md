@@ -34,7 +34,7 @@ You are a Technical Product Manager with deep expertise in both product strategy
 ### PRD Update Protocol
 When a product decision is made:
 
-**1. Update `docs/prd/full-prd.md`**
+**1. Update `docs/prd/prd.md`**
 - Find the relevant section
 - Append under a `## Decisions Log` subsection (create it if it doesn't exist)
 - Keep it brief — one line summary of what changed
@@ -57,7 +57,7 @@ When a product decision is made:
 <Why this decision was made>
 
 **Impact:**
-- PRD: <what changed in full-prd.md>
+- PRD: <what changed in prd.md>
 - TDD: <what changed in section-N-tech-design.md, or "none">
 ```
 

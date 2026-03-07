@@ -9,10 +9,17 @@
 MODEL="${1}"
 PROMPT="${2}"
 
-if [ -z "$GEMINI_API_KEY" ]; then
-  echo "ERROR: GEMINI_API_KEY environment variable not set."
-  echo "Get your free API key at: https://aistudio.google.com/apikey"
-  echo "Then run: export GEMINI_API_KEY=your_key_here"
+# Load from .env if not already set in environment
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  ENV_FILE="$(cd "$(dirname "$0")/../.." && pwd)/.env"
+  if [ -f "$ENV_FILE" ]; then
+    GEMINI_API_KEY=$(grep -E '^GEMINI_API_KEY=' "$ENV_FILE" | cut -d'=' -f2- | tr -d '"' | tr -d "'" | head -1)
+  fi
+fi
+
+if [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "ERROR: GEMINI_API_KEY not set in environment or .env file."
+  echo "Add GEMINI_API_KEY=your_key to .env or run: export GEMINI_API_KEY=your_key"
   exit 1
 fi
 
