@@ -16,6 +16,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
 import { loadHRZones, saveHRZones, type HRZones } from '../lib/hrZones';
 import { loadLTHR, saveLTHR } from '../lib/lthr';
+import PMCChart from '../components/PMCChart';
+import PMCSettingsModal from '../components/PMCSettingsModal';
 import {
   calculateVdot,
   predictTime,
@@ -131,6 +133,10 @@ export default function KeyMetricsScreen() {
   const [showHRModal, setShowHRModal] = useState(false);
   const [zoneInputs, setZoneInputs] = useState<ZoneInputs[]>(defaultZoneInputs());
   const [hrSaveError, setHrSaveError] = useState<string | null>(null);
+
+  // PMC state
+  const [showPMCSettings, setShowPMCSettings] = useState(false);
+  const [pmcRefreshTrigger, setPmcRefreshTrigger] = useState(0);
 
   // LTHR state
   const [lthr, setLthr] = useState<number | null>(null);
@@ -301,6 +307,26 @@ export default function KeyMetricsScreen() {
       )}
       <ScrollView className="flex-1 bg-gray-50">
         <View className="px-5 pt-8 pb-10">
+
+          {/* Performance Management Chart */}
+          <Card
+            title="Performance Management"
+            icon="analytics-outline"
+            action={
+              <TouchableOpacity
+                onPress={() => setShowPMCSettings(true)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ padding: 4 }}
+              >
+                <Ionicons name="settings-outline" size={18} color="#2563eb" />
+              </TouchableOpacity>
+            }
+          >
+            <PMCChart
+              refreshTrigger={pmcRefreshTrigger}
+              onOpenSettings={() => setShowPMCSettings(true)}
+            />
+          </Card>
 
           {/* VDOT Score */}
           <Card title="VDOT Score" icon="speedometer-outline">
@@ -525,6 +551,16 @@ export default function KeyMetricsScreen() {
         </View>
       </ScrollView>
       </SafeAreaView>
+
+      {/* PMC Settings Modal */}
+      <PMCSettingsModal
+        visible={showPMCSettings}
+        onClose={() => setShowPMCSettings(false)}
+        onRefitComplete={() => {
+          setPmcRefreshTrigger((t) => t + 1);
+          setShowPMCSettings(false);
+        }}
+      />
 
       {/* Race Entry Modal */}
       <Modal

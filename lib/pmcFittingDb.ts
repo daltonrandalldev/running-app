@@ -451,6 +451,251 @@ export async function runFitting(
   }
 }
 
+// ── PMC-007: Chart data types ─────────────────────────────────────────────────
+
+export interface PMCDataRow {
+  date: string;
+  ctl: number;
+  atl: number;
+  tsb: number;
+  tc_fitness_used: number;
+  tc_fatigue_used: number;
+}
+
+export interface AthleteParams {
+  tc_fitness: number;
+  tc_fatigue: number;
+  r_squared: number | null;
+  is_personalized: boolean;
+  n_benchmarks: number | null;
+  ci_tc_fitness_low: number | null;
+  ci_tc_fitness_high: number | null;
+  ci_tc_fatigue_low: number | null;
+  ci_tc_fatigue_high: number | null;
+  fitted_at: string | null;
+}
+
+export interface BenchmarkMarker {
+  date: string;
+  performance_score: number;
+  sport: string;
+}
+
+export interface RaceMarker {
+  date: string;
+  k_race_applied: number;
+  moving_time_seconds: number | null;
+}
+
+// ── PMC-007: Chart data queries ───────────────────────────────────────────────
+
+/**
+ * Fetch the most recent `days` days of PMC data for a sport from daily_pmc_values.
+ */
+export async function fetchPMCData(
+  sport: string = 'combined',
+  days: number = 120,
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<PMCDataRow[]> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+
+  const { data, error } = await supabase
+    .from('daily_pmc_values')
+    .select('date, ctl, atl, tsb, tc_fitness_used, tc_fatigue_used')
+    .eq('athlete_id', athleteId)
+    .eq('sport', sport)
+    .gte('date', cutoffDate)
+    .order('date', { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as PMCDataRow[];
+}
+
+/**
+ * Fetch athlete model parameters for a sport.
+ * Returns 42/7 defaults when no personalized row exists yet.
+ */
+export async function fetchAthleteParams(
+  sport: string = 'combined',
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<AthleteParams> {
+  const { data } = await supabase
+    .from('athlete_parameters')
+    .select(
+      'tc_fitness, tc_fatigue, r_squared, is_personalized, n_benchmarks, ' +
+        'ci_tc_fitness_low, ci_tc_fitness_high, ci_tc_fatigue_low, ci_tc_fatigue_high, fitted_at',
+    )
+    .eq('athlete_id', athleteId)
+    .eq('sport', sport)
+    .maybeSingle();
+
+  if (!data) {
+    return {
+      tc_fitness: 42,
+      tc_fatigue: 7,
+      r_squared: null,
+      is_personalized: false,
+      n_benchmarks: null,
+      ci_tc_fitness_low: null,
+      ci_tc_fitness_high: null,
+      ci_tc_fatigue_low: null,
+      ci_tc_fatigue_high: null,
+      fitted_at: null,
+    };
+  }
+  return data as unknown as AthleteParams;
+}
+
+/**
+ * Fetch benchmark effort dates/scores for chart overlay markers.
+ * When sport = 'combined', returns benchmarks for all sports.
+ */
+export async function fetchBenchmarkMarkers(
+  sport: string = 'combined',
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<BenchmarkMarker[]> {
+  let query = supabase
+    .from('benchmark_efforts')
+    .select('date, performance_score, sport')
+    .eq('athlete_id', athleteId)
+    .order('date', { ascending: true });
+
+  if (sport !== 'combined') {
+    query = query.eq('sport', sport);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []) as BenchmarkMarker[];
+}
+
+/** Fetch race activities for chart overlay markers (is_race = true). */
+export async function fetchRaceMarkers(): Promise<RaceMarker[]> {
+  const { data, error } = await supabase
+    .from('garmin_activities')
+    .select('start_time, k_race_applied, moving_time_seconds')
+    .eq('is_race', true)
+    .not('k_race_applied', 'is', null)
+    .order('start_time', { ascending: true });
+
+  if (error) throw error;
+
+  return (data ?? []).map(
+    (row: {
+      start_time: string;
+      k_race_applied: number;
+      moving_time_seconds: number | null;
+    }) => ({
+      date: row.start_time.slice(0, 10),
+      k_race_applied: row.k_race_applied,
+      moving_time_seconds: row.moving_time_seconds,
+    }),
+  );
+}
+
+/**
+ * Fetch raw activity TSS for CI confidence band computation.
+ * Returns up to MAX_BACKFILL_DAYS of activity history.
+ */
+export async function fetchRawActivitiesForCI(): Promise<PMCInput[]> {
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - MAX_BACKFILL_DAYS);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+
+  const { data, error } = await supabase
+    .from('garmin_activities')
+    .select('start_time, active_load, is_race, k_race_applied')
+    .not('active_load', 'is', null)
+    .gte('start_time', cutoffISO)
+    .order('start_time', { ascending: true });
+
+  if (error) throw error;
+
+  return (data ?? []).map(
+    (row: {
+      start_time: string;
+      active_load: number;
+      is_race: boolean | null;
+      k_race_applied: number | null;
+    }) => {
+      const rawTss = row.active_load;
+      const atl_tss =
+        row.is_race && row.k_race_applied != null
+          ? rawTss * row.k_race_applied
+          : undefined;
+      return { date: row.start_time.slice(0, 10), tss: rawTss, atl_tss };
+    },
+  );
+}
+
+/**
+ * Apply a manual parameter override to athlete_parameters and log it.
+ * Marks change_source = 'user_override' in the audit log.
+ * Triggers PMC recalculation with the new time constants.
+ */
+export async function upsertManualParams(
+  tcFitness: number,
+  tcFatigue: number,
+  sport: string = 'combined',
+  athleteId: string = SINGLE_ATHLETE_ID,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const prev = await fetchCurrentParams(athleteId, sport);
+    const fittedAt = new Date().toISOString();
+
+    const { error: upsertErr } = await supabase.from('athlete_parameters').upsert(
+      {
+        athlete_id: athleteId,
+        sport,
+        tc_fitness: tcFitness,
+        tc_fatigue: tcFatigue,
+        is_personalized: true,
+        fitted_at: fittedAt,
+      },
+      { onConflict: 'athlete_id,sport' },
+    );
+    if (upsertErr) throw upsertErr;
+
+    // Audit log entries for changed params
+    const pairs: Array<['tc_fitness' | 'tc_fatigue', number, number | null]> = [
+      ['tc_fitness', tcFitness, prev?.tc_fitness ?? null],
+      ['tc_fatigue', tcFatigue, prev?.tc_fatigue ?? null],
+    ];
+    for (const [param, newVal, oldVal] of pairs) {
+      if (oldVal === null || Math.abs(newVal - oldVal) > 0.001) {
+        const plainEnglish = generatePlainEnglish(param, oldVal, newVal, false);
+        await supabase.from('parameter_change_log').insert({
+          athlete_id: athleteId,
+          sport,
+          parameter_name: param,
+          old_value: oldVal,
+          new_value: newVal,
+          change_source: 'user_override',
+          plain_english: plainEnglish,
+          was_clamped: false,
+        });
+      }
+    }
+
+    // Recalculate PMC with new params
+    await recalculatePMC(undefined, sport, { tc_fitness: tcFitness, tc_fatigue: tcFatigue });
+
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
+}
+
+/** Mark a single notification as read. */
+export async function markNotificationRead(notificationId: string): Promise<void> {
+  await supabase
+    .from('athlete_notifications')
+    .update({ is_read: true })
+    .eq('id', notificationId);
+}
+
 /**
  * Fire-and-forget refit trigger.
  * Called after saveBenchmarkEffort — never throws, never blocks the caller.
