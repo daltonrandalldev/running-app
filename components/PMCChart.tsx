@@ -42,6 +42,7 @@ import {
   type RaceMarker,
   type AthleteNotification,
 } from '../lib/pmcFittingDb';
+import { recalculateAllSports, recalculatePMC } from '../lib/pmcRecalc';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -199,7 +200,7 @@ export default function PMCChart({ refreshTrigger = 0, onOpenSettings }: Props) 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [runData, cycleData, combinedData, runP, cycleP, combinedP, bms, raceMs, notifs] =
+      let [runData, cycleData, combinedData, runP, cycleP, combinedP, bms, raceMs, notifs] =
         await Promise.all([
           fetchPMCData('run'),
           fetchPMCData('cycle'),
@@ -211,6 +212,21 @@ export default function PMCChart({ refreshTrigger = 0, onOpenSettings }: Props) 
           fetchRaceMarkers(),
           getUnreadNotifications(),
         ]);
+
+      // First-run backfill: daily_pmc_values has never been populated
+      if (combinedData.length === 0) {
+        await recalculateAllSports();
+        [runData, cycleData, combinedData] = await Promise.all([
+          fetchPMCData('run'),
+          fetchPMCData('cycle'),
+          fetchPMCData('combined'),
+        ]);
+      } else if (cycleData.length === 0) {
+        // Cycle series empty while combined has data — re-run cycle backfill.
+        // (can happen if the sport filter bug populated 0 rows on first backfill)
+        await recalculatePMC(undefined, 'cycle');
+        cycleData = await fetchPMCData('cycle');
+      }
 
       setPmcData({ run: runData, cycle: cycleData, combined: combinedData });
       setParams({ run: runP, cycle: cycleP, combined: combinedP });

@@ -212,12 +212,15 @@ export async function recalculatePMC(
       );
     } else {
       // Sport-specific: filter by sport, use raw (race-adjusted) TSS, no sport weight.
+      // Use 'cycl' as the ilike fragment for 'cycle' so that Garmin values like
+      // 'cycling' / 'road_cycling' / 'indoor_cycling' are matched correctly.
+      const sportFragment = sport === 'cycle' ? 'cycl' : sport;
       const { data, error } = await supabase
         .from('garmin_activities')
         .select('start_time, active_load, is_race, k_race_applied')
         .not('active_load', 'is', null)
         .gte('start_time', cutoff)
-        .ilike('sport', `%${sport}%`)
+        .ilike('sport', `%${sportFragment}%`)
         .order('start_time', { ascending: true });
 
       if (error) throw error;
