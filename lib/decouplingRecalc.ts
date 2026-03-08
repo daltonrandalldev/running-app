@@ -36,6 +36,9 @@ import { loadLTHR } from './lthr';
 /** Placeholder athlete ID used until authentication is implemented. */
 const SINGLE_ATHLETE_ID = '00000000-0000-0000-0000-000000000001';
 
+/** Minimum total ascent (metres) required before GAP-adjusted distances are used. */
+const GAP_ASCENT_THRESHOLD_M = 100;
+
 /** Minimum number of qualifying runs before the baseline is considered established. */
 const BASELINE_MIN_RUNS = 20;
 
@@ -472,13 +475,171 @@ export async function recalculateDecouplingTrend(
  * Backfill decoupling calculations using Grade Adjusted Pace (GAP) instead of
  * raw speed.
  *
- * NOT YET IMPLEMENTED — depends on Section 6 (Grade Adjusted Pace).
- * See docs/output/section-5-tech-design.md §7.2 for the integration contract.
+ * Queries activity_decoupling for rows where awaiting_gap = true, checks
+ * whether GAP data is available (from activity_gap and lap_gap), constructs
+ * synthetic LapRecord objects with GAP-adjusted distance, and re-runs
+ * computeDecoupling(). Updates activity_decoupling to set gap_used and
+ * awaiting_gap = false.
  */
-export async function backfillDecouplingWithGAP(): Promise<{ ok: boolean; error?: string }> {
-  throw new Error(
-    'NotImplementedError: backfillDecouplingWithGAP() is a stub. ' +
-    'Implement when Section 6 (Grade Adjusted Pace) is complete. ' +
-    'See docs/output/section-5-tech-design.md §7.2 for the integration contract.',
-  );
+export async function backfillDecouplingWithGAP(): Promise<{
+  ok: boolean;
+  count?: number;
+  error?: string;
+}> {
+  try {
+    // Step 1: Query all activity_decoupling rows where awaiting_gap = true
+    const { data: pendingRows, error: fetchErr } = await supabase
+      .from('activity_decoupling')
+      .select('activity_id, effort_tier')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('awaiting_gap', true);
+
+    if (fetchErr) throw fetchErr;
+    if (!pendingRows || pendingRows.length === 0) {
+      return { ok: true, count: 0 };
+    }
+
+    let count = 0;
+
+    for (const pending of pendingRows) {
+      const activityId = pending.activity_id as string;
+
+      // Step 2: Fetch activity metadata from garmin_activities
+      const { data: actRow, error: actErr } = await supabase
+        .from('garmin_activities')
+        .select('activity_id, start_time, avg_hr, moving_time_seconds, distance, ascent, is_race, avg_pace_seconds')
+        .eq('activity_id', activityId)
+        .maybeSingle();
+
+      if (actErr) throw actErr;
+      if (!actRow) continue;
+
+      // Step 3: Fetch lap records from garmin_activity_laps (raw laps)
+      const { data: lapRows, error: lapErr } = await supabase
+        .from('garmin_activity_laps')
+        .select('lap, moving_time_seconds, elapsed_time_seconds, distance, avg_hr, ascent, descent')
+        .eq('activity_id', activityId)
+        .order('lap', { ascending: true });
+
+      if (lapErr) throw lapErr;
+
+      const rawLaps: LapRecord[] = (lapRows ?? []).map((r: any) => ({
+        lap: r.lap,
+        moving_time_seconds: r.moving_time_seconds,
+        elapsed_time_seconds: r.elapsed_time_seconds,
+        distance: r.distance,
+        avg_hr: r.avg_hr,
+        ascent: r.ascent,
+        descent: r.descent,
+      }));
+
+      // Step 4: Fetch activity_gap row to check threshold
+      const { data: gapRow, error: gapRowErr } = await supabase
+        .from('activity_gap')
+        .select('gap_applied, total_ascent_m')
+        .eq('activity_id', activityId)
+        .maybeSingle();
+
+      if (gapRowErr) throw gapRowErr;
+
+      // Apply threshold: use GAP only when total_ascent > 100m AND gap_applied = true
+      const useGap = (gapRow?.total_ascent_m ?? 0) > GAP_ASCENT_THRESHOLD_M
+                  && gapRow?.gap_applied === true;
+
+      let lapsForDecoupling: LapRecord[] = rawLaps;
+
+      if (useGap) {
+        // Step 5: Fetch lap_gap rows to get gap_pace_sec_per_km per lap
+        const { data: lapGapRows, error: lapGapErr } = await supabase
+          .from('lap_gap')
+          .select('lap, gap_pace_sec_per_km')
+          .eq('activity_id', activityId)
+          .order('lap', { ascending: true });
+
+        if (lapGapErr) throw lapGapErr;
+
+        // Build lookup map: lap number → gap_pace_sec_per_km
+        const gapPaceMap = new Map<number, number>(
+          (lapGapRows ?? []).map((r: any) => [r.lap as number, r.gap_pace_sec_per_km as number]),
+        );
+
+        // Step 6: Construct synthetic LapRecord objects with GAP-adjusted distance
+        // Formula: distance_m = (moving_time_seconds / gap_pace_sec_per_km) * 1000
+        lapsForDecoupling = rawLaps.map((lap) => {
+          const gapPace = gapPaceMap.get(lap.lap);
+          if (
+            gapPace == null ||
+            gapPace <= 0 ||
+            lap.moving_time_seconds == null ||
+            lap.moving_time_seconds <= 0
+          ) {
+            return lap;
+          }
+          const gapDistance = Math.round(((lap.moving_time_seconds / gapPace) * 1000) * 100) / 100;
+          return {
+            ...lap,
+            distance: gapDistance,
+          };
+        });
+      }
+
+      // Step 7: Re-run computeDecoupling() with the (possibly GAP-adjusted) laps
+      const thresholds = await resolveHRZoneThresholds();
+      let effort_tier: EffortTier = (pending.effort_tier as EffortTier) ?? 'moderate';
+      if (thresholds != null && actRow.avg_hr != null) {
+        effort_tier = classifyEffortTier(actRow.avg_hr as number, thresholds);
+      }
+
+      const activity: ActivityMetadata = {
+        activity_id: String(actRow.activity_id),
+        date: String(actRow.start_time).slice(0, 10),
+        avg_hr: actRow.avg_hr,
+        moving_time_seconds: actRow.moving_time_seconds,
+        distance: actRow.distance,
+        ascent: actRow.ascent,
+        is_race: actRow.is_race === true,
+        avg_pace_seconds: actRow.avg_pace_seconds,
+      };
+
+      const input: DecouplingInput = { activity, laps: lapsForDecoupling, effort_tier };
+      const result: DecouplingResult = computeDecoupling(input);
+
+      // Step 8: Upsert updated activity_decoupling row
+      const upsertRow = {
+        athlete_id: SINGLE_ATHLETE_ID,
+        activity_id: String(actRow.activity_id),
+        date: activity.date,
+        effort_tier: result.effort_tier,
+        ef_h1: result.ef_h1,
+        ef_h2: result.ef_h2,
+        decoupling_pct: result.decoupling_pct,
+        ef_q1: result.ef_q1,
+        ef_q2: result.ef_q2,
+        ef_q3: result.ef_q3,
+        ef_q4: result.ef_q4,
+        decoupling_q1q4_pct: result.decoupling_q1q4_pct,
+        decoupling_q1q2_pct: result.decoupling_q1q2_pct,
+        gap_used: useGap,
+        awaiting_gap: false,
+        hr_data_insufficient: result.hr_data_insufficient,
+        laps_excluded_warmup: result.laps_excluded_warmup,
+        laps_excluded_hr: result.laps_excluded_hr,
+        qualifying_duration_s: result.qualifying_duration_s,
+        skipped: result.skipped,
+        skip_reason: result.skip_reason,
+      };
+
+      const { error: upsertErr } = await supabase
+        .from('activity_decoupling')
+        .upsert(upsertRow, { onConflict: 'activity_id' });
+
+      if (upsertErr) throw upsertErr;
+
+      count++;
+    }
+
+    return { ok: true, count };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
 }
