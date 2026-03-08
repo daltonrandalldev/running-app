@@ -1,7 +1,7 @@
 ---
 name: staff-engineer-lead
 description: Use this agent for technical design creation and all code writing. This is the lead engineer who owns engineering decisions and implementation.
-model: claude-opus-4-6
+model: claude-sonnet-4-6
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 

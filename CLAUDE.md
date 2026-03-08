@@ -149,7 +149,7 @@ All pipeline output files use the `section-N-` naming prefix. Section number com
 |---|---|---|---|
 | Program Manager | (main session) | Both | Orchestration only |
 | TPM Agent | claude-sonnet-4-6 | Both | docs/prd/prd.md, docs/agent-decision-log.md |
-| Staff Engineer Lead | claude-opus-4-6 | Both | docs/output/, src/, docs/agent-decision-log.md |
+| Staff Engineer Lead | claude-sonnet-4-6 | Both | docs/output/, src/, docs/agent-decision-log.md |
 | Staff Engineer 2 | gemini-2.5-pro (external) | Both | None (review only) |
 | Prompt Engineer | claude-sonnet-4-6 | Phase 1 | docs/output/ |
 | QA Engineer | claude-sonnet-4-6 | Phase 2 | None (review only) |
