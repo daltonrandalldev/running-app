@@ -19,6 +19,7 @@ import {
   type ActivityGapResult,
 } from './gap';
 import { backfillDecouplingWithGAP } from './decouplingRecalc';
+import { recalculateEF } from './efRecalc';
 
 // ── Module constants ───────────────────────────────────────────────────────────
 
@@ -175,6 +176,8 @@ export async function computeGAPBatch(activityIds: string[]): Promise<BatchGAPRe
     const backfillResult = await triggerDecouplingBackfill();
     const backfill_triggered = backfillResult.ok ? (backfillResult.count ?? 0) : 0;
 
+    await triggerEFRecalc(/* fromDate is not passed here; recalculate all */);
+
     return { ok: true, processed, skipped, errors, backfill_triggered };
   } catch (e: any) {
     return {
@@ -185,6 +188,24 @@ export async function computeGAPBatch(activityIds: string[]): Promise<BatchGAPRe
       backfill_triggered: 0,
       error: e?.message ?? 'Unknown error',
     };
+  }
+}
+
+// ── EF-005: EF recalculation delegation ──────────────────────────────────────
+
+/**
+ * Delegates to recalculateEF() from efRecalc.ts.
+ * Does not duplicate any logic — thin wrapper for error isolation only.
+ */
+export async function triggerEFRecalc(fromDate?: string): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  try {
+    const result = await recalculateEF(fromDate);
+    return { ok: result.ok, error: result.error };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
   }
 }
 
