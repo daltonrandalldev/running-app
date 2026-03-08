@@ -210,3 +210,163 @@ The `computeSegmentEF` function explicitly iterates `for (const f of fractions)`
 **Impact:**
 - PRD: none
 - TDD: none — implementation is correct as written
+
+---
+
+## [2026-03-07] Section 6 — GAP Formulation: Minetti Only (REVIEW Marker Resolved)
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** [REVIEW] marker in Section 6.3 asking whether to implement Minetti, Strava, or both GAP formulations
+
+**Decision:**
+Minetti's original polynomial (Minetti et al., 2002) is the sole formulation implemented. Strava's proprietary version and GOVSS are not implemented.
+
+**Rationale:**
+Strava's GAP algorithm is undocumented and cannot be faithfully reproduced — any implementation would be an approximation of an approximation. GOVSS is a further simplification. The Minetti curve is the only formulation grounded in peer-reviewed physiology and is the appropriate choice for a scientifically rigorous analytics platform. The PRD already recommended it as default; there is no user value in dual-formulation comparison at this stage of a single-athlete app.
+
+**Impact:**
+- PRD: Section 6.2 [REVIEW] block removed; Minetti-only decision stated explicitly; alternative formulations removed from background text
+- TDD: none yet
+
+---
+
+## [2026-03-07] Section 6 — Per-Record Stream Conflict: Adapt to Per-Lap Computation
+
+**Type:** Technical Decision (Product Scope Clarification)
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** PRD Section 6.3 stated "Applied per-record in the activity stream" — per-second activity records are not available in Supabase (same constraint documented for Section 5)
+
+**Decision:**
+GAP is computed at lap granularity using `garmin_activity_laps`. Grade per lap is calculated as `(ascent - descent) / (distance_km * 1000)` using the lap's existing `ascent`, `descent`, and `distance` columns. All requirements language referring to "per stream record" or "per record" is updated to "per lap."
+
+**Rationale:**
+This is the same architectural constraint that reshaped Section 5. The lap table already contains the elevation fields needed (ascent, descent in meters, distance in km), so per-lap grade is fully computable without any new data. Lap-level grade is a coarser but practically sufficient granularity — a full-kilometer lap at 10% average grade is a meaningful elevation segment and the Minetti adjustment is valid at that scale.
+
+**Impact:**
+- PRD: Section 6.3 rewritten to specify per-lap computation; formula updated; "per-record in the activity stream" language removed throughout Section 6.3 and 6.4
+- TDD: implementation must use garmin_activity_laps as the computation source
+
+---
+
+## [2026-03-07] Section 6 — Elevation Smoothing: Not Applicable at Lap Level
+
+**Type:** Technical Decision (Product Scope Clarification)
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** PRD Section 6.3 specified a 30-second moving average or Kalman filter to smooth raw GPS elevation noise — this is a per-second stream operation and is not applicable to lap-level data
+
+**Decision:**
+The 30-second moving average and Kalman filter smoothing steps are removed from the specification. At lap granularity, GarminDB aggregates lap-level ascent and descent directly from the FIT file records (which use barometric altimeter data on equipped Garmin devices). The lap aggregation itself provides low-frequency smoothing equivalent to — or better than — a 30-second window. No additional smoothing is required or implementable at lap level.
+
+**Rationale:**
+Smoothing was specified to address per-second GPS altitude noise. The barometric altimeter data that GarminDB reads into `ascent`/`descent` is already higher quality than GPS elevation, and the aggregation across an entire lap (typically 4–8 minutes of data) eliminates the short-window noise the smoothing was designed to address. Implementing a synthetic smoothing step at lap level would be meaningless.
+
+**Impact:**
+- PRD: Section 6.3 "Elevation data smoothing" subsection replaced with explanation of barometric altimeter data path through GarminDB to lap-level ascent/descent columns; no smoothing step specified
+- TDD: no smoothing implementation required
+
+---
+
+## [2026-03-07] Section 6 — Grade Clamping at Extreme Values
+
+**Type:** Technical Decision
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** The Minetti polynomial produces near-zero or negative C(g) values at grades steeper than approximately -45%, which would cause GAP to blow up to infinity or invert; no clamping was specified in the PRD
+
+**Decision:**
+Grade is clamped to [-0.40, +0.45] (fractional) before evaluating C(g). A boolean `grade_clamped` flag is stored per lap record in the `lap_gap` table to indicate when clamping was applied.
+
+**Rationale:**
+At g = -0.45, C(g) approaches ~0.2 J/kg/m, causing GAP to be ~18x actual pace — physiologically nonsensical. Real trail running rarely sustains a full lap at grades outside this range, so clamping affects only outlier laps (e.g., a very steep descent). The flag preserves transparency: analysts can see which laps had extreme grades without corrupting the GAP value. The specific bounds [-0.40, +0.45] correspond to approximately -40% and +45% grades, which are at or beyond the steepest runnable sustained terrain.
+
+**Impact:**
+- PRD: Section 6.3 "Grade clamping" subsection added; Section 6.4 requirements table updated to include grade_clamped flag in acceptance criteria
+- TDD: implementation must clamp g before polynomial evaluation and record the flag
+
+---
+
+## [2026-03-07] Section 6 — Activity Average GAP: Distance-Weighted Mean of Lap GAP Values
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** PRD said "averaged for summary stats" but did not specify the averaging method; with lap-level data, a simple mean would weight a short 200m lap equally to a 1km lap
+
+**Decision:**
+Activity-level average GAP pace is the distance-weighted mean of per-lap GAP pace values: `avg_gap_pace = Σ(lap_gap_pace * lap_distance) / Σ(lap_distance)`. Laps with NULL or zero distance or moving_time are excluded. Laps with NULL ascent AND NULL descent are treated as grade = 0 (GAP equals actual pace for those laps).
+
+**Rationale:**
+Distance-weighted averaging is the correct aggregation because pace is a rate measured over distance — each meter contributes equally to the average, not each lap. A simple arithmetic mean would distort the result whenever lap distances are unequal (which is common for the first or last partial lap). This is consistent with how Section 5 computes weighted-average EF from laps.
+
+**Impact:**
+- PRD: Section 6.3 "Activity-level average GAP" formula specified explicitly; NULL handling for elevation data documented
+- TDD: computeGAP function must use distance-weighted mean
+
+---
+
+## [2026-03-07] Section 6 — Storage Schema: Two New Tables (activity_gap and lap_gap)
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** TPM Agent
+**Triggered by:** PRD said "store both raw pace and GAP per activity and per stream record" but did not specify whether to add columns to garmin_activities/garmin_activity_laps or create new tables
+
+**Decision:**
+Two new tables are introduced: `activity_gap` (one row per activity, storing activity-level summary GAP values) and `lap_gap` (one row per activity_id + lap, storing per-lap raw pace, GAP pace, grade, and grade_clamped flag). No columns are added to the existing `garmin_activities` or `garmin_activity_laps` tables.
+
+**Rationale:**
+Follows the pattern established by Section 5 (activity_decoupling as a separate table) and Section 2 (daily_pmc_values as a separate table). The source tables garmin_activities and garmin_activity_laps are synced from GarminDB and should remain a clean mirror of the source data. GAP is a derived analytical output that belongs in its own tables, enabling independent recomputation and clean separation of ingestion from analytics. The `activity_gap` table also serves as the trigger point for Section 5's backfill: when gap_used = false AND awaiting_gap = true on an activity_decoupling row, the system can check activity_gap for a computed value and update.
+
+**Impact:**
+- PRD: Section 6.4 requirements table updated to name the two new tables and their key columns
+- TDD: migration SQL for activity_gap and lap_gap required; both tables follow RLS-disabled, anon-granted pattern consistent with all other tables
+
+---
+
+## [2026-03-07] Section 6 TDD Review: C1 Override — RLS/Permissions Pattern
+
+**Type:** Debate Override
+**Phase:** Phase 1
+**Section:** Section 6
+**Agent:** Staff Engineer Lead
+**Triggered by:** Staff Engineer 2 C1 concern about anon/authenticated GRANT with RLS disabled
+
+**Decision:**
+C1 overridden. RLS disabled with GRANT to anon/authenticated is the established project-wide pattern (documented in CLAUDE.md) applied to every existing table. This was also overridden in the Section 5 debate loop for identical reasons.
+
+**Rationale:**
+This is a single-athlete app with no auth system. Engineer 2's concern is valid for multi-tenant systems but inapplicable here. Changing this pattern for Section 6 alone would create architectural inconsistency with daily_pmc_values, activity_decoupling, and every other table in the codebase. The scope of Section 6 does not include introducing authentication infrastructure.
+
+**Impact:**
+- PRD: none
+- TDD: none — SQL schema is correct as designed
+
+---
+
+## [2026-03-08] GAP-001 Code Review: C1 Override — C_FLAT and round2 Are Defined
+
+**Type:** Debate Override
+**Phase:** Phase 2 — Ticket 1 (GAP-001)
+**Section:** Section 6
+**Agent:** Staff Engineer Lead
+**Triggered by:** Staff Engineer 2 C1 concern claiming C_FLAT and round2 are undeclared
+
+**Decision:**
+C1 overridden. Both C_FLAT (= 3.6, module-level const) and round2 (private helper) are defined in lib/gap.ts. The concern was based on an incomplete code summary. All 42 unit tests pass including the 10-lap regression fixture.
+
+**Rationale:**
+Engineer 2 reviewed a prompt-level summary of the code, not the full file. The constant and helper are present at lines near the top of lib/gap.ts. npm test confirms all tests pass.
+
+**Impact:**
+- PRD: none
+- TDD: none — implementation is correct as written

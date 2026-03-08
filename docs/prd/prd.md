@@ -592,10 +592,19 @@ Minetti et al. (2002, J Appl Physiol) published the foundational energy
 cost curve for running on grade, showing metabolic cost follows an
 asymmetric polynomial: uphill running costs more than the energy saved
 going downhill at the same grade. The optimal downhill grade (lowest
-energy cost) is approximately -10% to -20%. Strava's GAP algorithm is
-based on a simplified version of this curve. Several formulations exist:
-Minetti's original polynomial, GOVSS (Skiba), and Strava's proprietary
-version.
+energy cost) is approximately -10% to -20%.
+
+**Formulation decision:** Minetti's original polynomial is the sole
+implementation. Strava's proprietary version is undocumented and cannot
+be reproduced faithfully; GOVSS (Skiba) is a further approximation. The
+Minetti curve is the most physiologically grounded and is the standard
+cited in peer-reviewed literature.
+
+**Data architecture constraint:** Per-second activity stream records are
+not available in Supabase (same constraint established in Section 5).
+Only lap-level data from `garmin_activity_laps` is synced. All GAP
+calculations are performed at lap granularity. See Section 5 decision
+log entry "Lap-Level Data as the Only Available Stream Source."
 
 ## 6.3 Calculation Specification
 
@@ -607,45 +616,93 @@ J/kg/m):**
 
 where g = fractional grade (e.g., 0.10 for 10% uphill).
 
-> GAP = actual_pace \* (C(0) / C(grade_at_this_point))
+Note: C(0) = 3.6 J/kg/m (flat-ground baseline). For uphill grades,
+C(grade) > C(0), so GAP < actual pace (effort-equivalent flat pace is
+faster). For moderate downhill, C(grade) < C(0), so GAP > actual pace.
 
-Applied per-record in the activity stream, then averaged for summary
-stats.
+> GAP\_pace\_per\_lap = actual\_lap\_pace \* (C(0) / C(grade\_lap))
 
-**Elevation data smoothing:**
+where actual\_lap\_pace is derived from the lap's `distance` (km) and
+`moving_time_seconds`: actual\_lap\_pace\_sec\_per\_km = (moving\_time\_seconds / distance\_km).
 
-Raw GPS elevation is noisy. Apply a moving average (window = 30 seconds)
-or Kalman filter before computing grade. If barometric altimeter data is
-available (Garmin), prefer it over GPS elevation.
+**Per-lap grade calculation:**
 
-**\[REVIEW\]** Which GAP formulation do you prefer? Minetti's original
-is most physiologically grounded. Strava's is undocumented but familiar.
-We could implement both and let you compare. The Minetti curve is
-recommended as default.
+Grade is computed from the lap's elevation columns in
+`garmin_activity_laps`:
+
+> grade\_lap = (ascent - descent) / (distance\_km \* 1000)
+
+where `ascent` and `descent` are in meters and `distance` is in km.
+These values come from GarminDB's sync of the Garmin FIT file, which
+uses barometric altimeter data when available (Garmin devices with
+barometric altimeters store baro altitude in the FIT file; GarminDB
+aggregates to lap-level ascent/descent from those records). No
+additional smoothing is applied at lap level — the lap aggregation
+itself provides the equivalent of low-frequency smoothing.
+
+**Grade clamping:**
+
+The Minetti polynomial produces physiologically unreliable values at
+extreme grades. Clamp grade to \[-0.40, +0.45\] before evaluating C(g).
+Laps exceeding these bounds (very steep trail segments) receive GAP
+calculated at the clamped bound; a `grade_clamped` boolean flag is
+stored per lap. Real activities rarely sustain a full lap at grades
+outside this range.
+
+**Activity-level average GAP:**
+
+Average GAP pace for the activity is the distance-weighted mean of
+per-lap GAP pace values:
+
+> avg\_gap\_pace = Σ(lap\_gap\_pace \* lap\_distance) / Σ(lap\_distance)
+
+Only laps with valid distance and moving time (distance > 0,
+moving\_time\_seconds > 0) are included. Laps with ascent IS NULL
+AND descent IS NULL are treated as flat (grade = 0, GAP = actual pace).
+
+**GAP computation is client-side,** following the established pattern
+from Section 5 (decoupling) and Section 2 (PMC). The `computeGAP`
+function in `lib/gap.ts` reads laps from Supabase, computes per-lap GAP
+values, and upserts results into `activity_gap` and `lap_gap` tables.
 
 ## 6.4 Requirements
 
   -----------------------------------------------------------------------
   **Requirement**                           **Acceptance Criteria**
   ----------------------------------------- -----------------------------
-  Compute per-record grade from smoothed    Grade calculated with 30s
-  elevation data                            smoothing window. Barometric
-                                            altimeter data used when
-                                            available.
+  Compute per-lap grade from lap elevation  Grade = (ascent - descent) /
+  data in garmin\_activity\_laps             (distance\_km * 1000).
+                                            Clamped to [-0.40, +0.45].
+                                            grade\_clamped flag stored.
+                                            Laps with NULL ascent/descent
+                                            treated as grade = 0.
 
   Apply Minetti energy cost curve to        GAP values physiologically
-  produce GAP per record                    reasonable: 10% uphill should
-                                            produce GAP \~30-40% faster
-                                            than actual pace.
+  produce GAP per lap                       reasonable: 10% uphill lap
+                                            should produce GAP \~30-40%
+                                            faster than actual pace.
+                                            C(0) = 3.6 used as baseline.
 
-  Store both raw pace and GAP per activity  Average GAP, max GAP, and
-  and per stream record                     per-record GAP streams
-                                            persisted.
+  Store both raw pace and GAP per activity  activity\_gap table: one row
+  and per lap                               per activity storing
+                                            avg\_gap\_pace\_seconds,
+                                            avg\_raw\_pace\_seconds, and
+                                            total\_ascent\_m.
+                                            lap\_gap table: one row per
+                                            (activity\_id, lap) storing
+                                            raw\_pace\_sec\_per\_km,
+                                            gap\_pace\_sec\_per\_km,
+                                            grade\_fractional, and
+                                            grade\_clamped.
 
   GAP used as input for decoupling (Section All downstream calculations
   5), EF (Section 7), and rTSS (Section 8)  can toggle between raw pace
   calculations when elevation data present  and GAP. Default: use GAP
-                                            when elevation gain \>100m.
+                                            when activity ascent \>100m
+                                            (from garmin\_activities.ascent).
+                                            Section 5 backfill triggered
+                                            when gap\_used = false AND
+                                            awaiting\_gap = true.
   -----------------------------------------------------------------------
 
 # 7. Running: Efficiency Factor (EF)
