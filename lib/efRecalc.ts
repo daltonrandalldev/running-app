@@ -196,7 +196,7 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
               date: String(actRow.start_time).slice(0, 10),
               sport: 'run',
               ef_value: efResult.efValue,
-              gap_used: efResult.gapUsed,
+              gap_used: useGAP,
               qualifying: qualifyingResult.qualifying,
               disqualification_reason: qualifyingResult.reason ?? null,
               temp_c: actRow.avg_temperature ?? null,
@@ -367,5 +367,9 @@ export async function backfillEFWithTempAdjustment(): Promise<{
   count?: number;
   error?: string;
 }> {
-  return { ok: true, count: 0 };
+  try {
+    return { ok: true, count: 0 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
 }
