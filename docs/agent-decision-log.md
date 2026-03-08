@@ -370,3 +370,83 @@ Engineer 2 reviewed a prompt-level summary of the code, not the full file. The c
 **Impact:**
 - PRD: none
 - TDD: none — implementation is correct as written
+
+---
+
+## [2026-03-08] Section 7 — Cycling EF Deferred to Section 12
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 7
+**Agent:** TPM Agent
+**Triggered by:** [PRODUCT_QUESTION] from TPM intake, Section 7
+
+**Decision:**
+Cycling EF (EF_cycle = normalized_power / avg_HR) is deferred entirely to Section 12. Section 7 scope is running EF only. The `efRecalc.ts` pipeline will be extended with cycling EF as a Phase 2 addition once Section 12 delivers normalized power data to the schema.
+
+**Rationale:**
+Normalized power (NP) is not available in the current schema — garmin_activities has no watts or power column. NP is a Section 12 deliverable. Stubbing with an awaiting_np flag provides marginal value and introduces dead code paths; computing an approximation using a non-power metric would diverge from the established EF definition and produce misleading values. Deferral is the cleanest choice: Section 7 ships a correct, complete running EF implementation and cycling EF is added in Section 12 with the proper data dependency in place.
+
+**Impact:**
+- PRD: Section 7.3 formula block updated to mark EF_cycle as deferred to Section 12; Section 7.4 requirements updated to clarify running EF only for initial implementation
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 7 — Warmup Exclusion Uses Lap-Drop Approach
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 7
+**Agent:** TPM Agent
+**Triggered by:** [PRODUCT_QUESTION] from TPM intake, Section 7
+
+**Decision:**
+Warmup exclusion for EF computation uses the lap-drop approach: laps whose cumulative elapsed time from activity start is less than 10 minutes are excluded. EF is re-derived from post-warmup laps only. This requires fetching `garmin_activity_laps` during EF computation.
+
+**Rationale:**
+This is consistent with the Section 5 precedent (documented in the 2026-03-07 "Warmup Exclusion Mechanism via Laps" decision). Using the raw activity-level avg_GAP and avg_HR is simpler but warmup-contaminated, producing systematically lower EF values (warmup HR and pace are both unsteady). The lap-drop approach yields a cleaner signal and reuses the established implementation pattern. Architectural consistency across the analytics pipeline is a priority.
+
+**Impact:**
+- PRD: Section 7.3 filtering criteria updated to specify lap-drop approach (cumulative elapsed time < 10 min) rather than a simple time-based exclusion note
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 7 — HR Zone Filtering Uses Shared resolveHRZones Utility
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 7
+**Agent:** TPM Agent
+**Triggered by:** [PRODUCT_QUESTION] from TPM intake, Section 7
+
+**Decision:**
+HR zone filtering for the Z1–Z2 easy aerobic qualifying runs uses the same four-priority resolution chain established in `decouplingRecalc.ts` (AsyncStorage → LTHR → lap hrz_* columns → default). This chain is extracted into a shared utility function `resolveHRZones(activityId)` in `lib/hrZones.ts` if not already present there. Section 7 imports from that shared utility rather than duplicating the resolution logic.
+
+**Rationale:**
+Hardcoding Z2 = <75% max HR is simpler but produces a fixed boundary that ignores personalized LTHR data already stored in the system. The four-priority chain is the correct resolution order for this codebase (personalized data takes priority over defaults) and is already tested as part of Section 5. Duplicating the logic in efRecalc.ts creates divergence risk: if the resolution chain is updated in one place it must be updated in both. Extracting to a shared lib is the standard refactor that eliminates this risk.
+
+**Impact:**
+- PRD: Section 7.3 filtering criteria updated to reference the shared HR zone resolution chain from lib/hrZones.ts
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 7 — Regression Type: Linear Only for Initial Implementation
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 7
+**Agent:** TPM Agent
+**Triggered by:** [PRODUCT_QUESTION] from TPM intake, Section 7
+
+**Decision:**
+Section 7 implements linear regression only for the EF trend. Polynomial regression is explicitly out of scope for the initial implementation. The code will include a TODO comment marking the extension point for polynomial regression in a future iteration.
+
+**Rationale:**
+Easy aerobic run data for a single athlete is inherently sparse — at most a few qualifying runs per week. Polynomial regression on sparse data is prone to overfitting and can produce curves that are locally accurate but directionally misleading (e.g., a degree-3 polynomial showing apparent EF improvement at the end of a period that is actually noise). Linear regression is defensible, interpretable, and statistically appropriate for the data volume expected at this stage. A slope on a linear fit over 30–90 days is a clear, actionable signal.
+
+**Impact:**
+- PRD: Section 7.3 adaptive baseline requirement updated to specify linear regression only; polynomial regression removed as an option in the initial spec; TODO extension point noted
+- TDD: none — TDD not yet written

@@ -727,7 +727,10 @@ normalization (Section 21) improves signal quality.
 
 > EF_run = avg_GAP (m/s) / avg_HR (bpm)
 >
-> EF_cycle = normalized_power (W) / avg_HR (bpm)
+> EF_cycle = normalized_power (W) / avg_HR (bpm) — **deferred to Section 12**
+> (normalized_power is not in the current schema; cycling EF will be added
+> to efRecalc.ts once Section 12 delivers NP data. Section 7 covers running
+> EF only.)
 
 Higher EF = more efficient. Use pace in m/s (not min/mile) so that
 higher values always = better.
@@ -735,21 +738,30 @@ higher values always = better.
 **Filtering for trend quality:**
 
 - Only include runs in Z1--Z2 HR range for the EF trendline (easy
-  aerobic runs)
+  aerobic runs; HR zone boundaries resolved via the four-priority chain
+  from `lib/hrZones.ts`: AsyncStorage → LTHR → lap hrz\_\* columns →
+  default — same chain used by decouplingRecalc.ts)
 
 - Exclude runs \<30 minutes (insufficient steady state)
 
 - Exclude runs with temperature \>27°C or \<0°C unless
   temperature-adjusted (Section 21)
 
-- Exclude first 10 minutes of each run
+- Exclude first 10 minutes of each run (implemented via lap-drop: laps
+  whose cumulative elapsed time from activity start is \<10 minutes are
+  excluded in full; EF is re-derived from post-warmup laps only using
+  `garmin_activity_laps`, consistent with the Section 5 warmup exclusion
+  precedent)
 
 **Adaptive baseline:**
 
 Build personal EF curve by HR zone. At HR 140, your EF might be 0.038
 m/s/bpm. If it rises to 0.041 over 8 weeks, that's a \~8% aerobic
-fitness gain. The system should fit a linear or polynomial regression of
-EF vs. date for the easy zone and report slope (rate of improvement).
+fitness gain. The system should fit a **linear regression** of EF vs.
+date for the easy zone and report slope (rate of improvement). (Polynomial
+regression is out of scope for the initial implementation — sparse
+easy-run data makes polynomial fits statistically fragile. A TODO
+extension point will be documented in the code for a future iteration.)
 
 ## 7.4 Requirements
 
