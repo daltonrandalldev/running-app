@@ -83,8 +83,11 @@ export function calculateEFFromLaps(laps: EFLapRecord[]): EFFromLapsResult | nul
       speedMps = 1000 / lap.gap_pace_sec_per_km;
       gapUsed = true;
     } else {
-      // Raw speed from distance / moving time
-      speedMps = (lap.distance ?? 0) / movingTime;
+      // Raw speed from distance / moving time.
+      // Skip laps where distance is null — contributing 0 m/s would incorrectly
+      // drag down the weighted average (Concern 1 fix).
+      if (lap.distance === null) continue;
+      speedMps = lap.distance / movingTime;
     }
 
     weightedSpeedSum += speedMps * movingTime;
@@ -126,8 +129,10 @@ export function isQualifyingRun(params: {
     return { qualifying: false, reason: 'temp_out_of_range' };
   }
 
-  // 3. HR zone check: must be within Z1 min and Z2 max (zones[0] = Z1, zones[1] = Z2)
-  if (avgHR > zones[1].max || avgHR < zones[0].min) {
+  // 3. HR zone check: must be within Z1 min and Z2 max (zones[0] = Z1, zones[1] = Z2).
+  // Guard against under-populated zones arrays — if fewer than 2 zones are present
+  // we cannot determine zone membership, so we do not disqualify (Concern 3 fix).
+  if (zones.length >= 2 && (avgHR > zones[1].max || avgHR < zones[0].min)) {
     return { qualifying: false, reason: 'hr_outside_z2' };
   }
 
