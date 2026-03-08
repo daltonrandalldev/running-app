@@ -28,8 +28,7 @@ import {
   type EffortTier,
   type HRZoneThresholds,
 } from './decoupling';
-import { loadHRZones } from './hrZones';
-import { loadLTHR } from './lthr';
+import { resolveHRZones } from './hrZones';
 
 // ── Module constants ──────────────────────────────────────────────────────────
 
@@ -76,67 +75,6 @@ export interface TrendRecalcResult {
   ok: boolean;
   rows_upserted?: number;
   error?: string;
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/**
- * Resolve HRZoneThresholds via a four-priority chain:
- *   1. HR zones loaded from AsyncStorage (loadHRZones)
- *   2. LTHR from AsyncStorage/Supabase (loadLTHR) → derive zone boundaries
- *   3. Most-recent garmin_activity_laps hrz_3_hr / hrz_4_hr columns
- *   4. Return null (caller defaults to 'moderate')
- */
-async function resolveHRZoneThresholds(): Promise<HRZoneThresholds | null> {
-  // Priority 1: AsyncStorage HR zone array
-  try {
-    const zones = await loadHRZones();
-    if (zones && zones[2]?.min != null && zones[3]?.min != null) {
-      return {
-        hrz_3_min: zones[2].min,
-        hrz_4_min: zones[3].min,
-      };
-    }
-  } catch {
-    // fall through
-  }
-
-  // Priority 2: LTHR → derive thresholds
-  try {
-    const lthr = await loadLTHR();
-    if (lthr != null) {
-      return {
-        hrz_3_min: Math.round(lthr * 0.82),
-        hrz_4_min: Math.round(lthr * 0.90),
-      };
-    }
-  } catch {
-    // fall through
-  }
-
-  // Priority 3: most recent lap-level hrz columns
-  try {
-    const { data } = await supabase
-      .from('garmin_activity_laps')
-      .select('hrz_3_hr, hrz_4_hr')
-      .not('hrz_3_hr', 'is', null)
-      .not('hrz_4_hr', 'is', null)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (data?.hrz_3_hr != null && data?.hrz_4_hr != null) {
-      return {
-        hrz_3_min: data.hrz_3_hr as number,
-        hrz_4_min: data.hrz_4_hr as number,
-      };
-    }
-  } catch {
-    // fall through
-  }
-
-  // Priority 4: no thresholds available
-  return null;
 }
 
 // ── DEC-003: Per-activity decoupling computation ──────────────────────────────
@@ -190,9 +128,13 @@ export async function computeActivityDecoupling(
     }));
 
     // Resolve effort tier
-    const thresholds = await resolveHRZoneThresholds();
+    const zones = await resolveHRZones();
+    const thresholds: HRZoneThresholds = {
+      hrz_3_min: zones[2].min,
+      hrz_4_min: zones[3].min,
+    };
     let effort_tier: EffortTier = 'moderate';
-    if (thresholds != null && actRow.avg_hr != null) {
+    if (actRow.avg_hr != null) {
       effort_tier = classifyEffortTier(actRow.avg_hr as number, thresholds);
     }
 
@@ -584,9 +526,13 @@ export async function backfillDecouplingWithGAP(): Promise<{
       }
 
       // Step 7: Re-run computeDecoupling() with the (possibly GAP-adjusted) laps
-      const thresholds = await resolveHRZoneThresholds();
+      const zones = await resolveHRZones();
+      const thresholds: HRZoneThresholds = {
+        hrz_3_min: zones[2].min,
+        hrz_4_min: zones[3].min,
+      };
       let effort_tier: EffortTier = (pending.effort_tier as EffortTier) ?? 'moderate';
-      if (thresholds != null && actRow.avg_hr != null) {
+      if (actRow.avg_hr != null) {
         effort_tier = classifyEffortTier(actRow.avg_hr as number, thresholds);
       }
 

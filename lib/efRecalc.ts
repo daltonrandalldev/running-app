@@ -19,7 +19,7 @@ import {
   normalizeTempEF,
   type EFLapRecord,
 } from './ef';
-import { loadHRZones, type HRZones } from './hrZones';
+import { resolveHRZones, type HRZones } from './hrZones';
 
 // ── Module constants ────────────────────────────────────────────────────────
 
@@ -34,33 +34,6 @@ const GAP_ASCENT_THRESHOLD_M = 100;
 
 /** Relative change threshold for the EF alert (5%). */
 const EF_ALERT_THRESHOLD = 0.05;
-
-// ── Local stub for resolveHRZones (EF-004 will supply the real implementation)
-// TODO (EF-004): replace this stub with the real resolveHRZones() from hrZones.ts
-// once EF-004 is complete. Import it as:
-//   import { resolveHRZones } from './hrZones';
-// and remove this local implementation.
-
-/** Default HR zones used when no athlete-specific zones are stored. */
-const DEFAULT_HR_ZONES: HRZones = [
-  { min: 100, max: 140 }, // Z1
-  { min: 141, max: 160 }, // Z2
-  { min: 161, max: 175 }, // Z3
-  { min: 176, max: 188 }, // Z4
-  { min: 189, max: 220 }, // Z5
-];
-
-/**
- * Resolve HR zones for the athlete.
- * Reads from AsyncStorage via loadHRZones(); falls back to DEFAULT_HR_ZONES.
- *
- * TODO (EF-004): this stub will be replaced by the real resolveHRZones()
- * exported from lib/hrZones.ts once that ticket ships.
- */
-async function resolveHRZones(): Promise<HRZones> {
-  const stored = await loadHRZones();
-  return stored ?? DEFAULT_HR_ZONES;
-}
 
 // ── Return-type interfaces ───────────────────────────────────────────────────
 
@@ -196,7 +169,7 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
               date: String(actRow.start_time).slice(0, 10),
               sport: 'run',
               ef_value: efResult.efValue,
-              gap_used: efResult.gapUsed,
+              gap_used: useGAP,
               qualifying: qualifyingResult.qualifying,
               disqualification_reason: qualifyingResult.reason ?? null,
               temp_c: actRow.avg_temperature ?? null,
@@ -367,5 +340,9 @@ export async function backfillEFWithTempAdjustment(): Promise<{
   count?: number;
   error?: string;
 }> {
-  return { ok: true, count: 0 };
+  try {
+    return { ok: true, count: 0 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
 }
