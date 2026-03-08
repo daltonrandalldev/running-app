@@ -27,6 +27,7 @@ import type { RootStackParamList, MainTabParamList } from '../App';
 import { supabase } from '../lib/supabase';
 import { triggerSync } from '../lib/syncApi';
 import { loadHRZones, getZoneForHR, type HRZones } from '../lib/hrZones';
+import { computeActivityDecouplingBatch } from '../lib/decouplingRecalc';
 
 type Props = CompositeScreenProps<
   BottomTabScreenProps<MainTabParamList, 'Home'>,
@@ -823,6 +824,30 @@ export default function HomeScreen({ navigation }: Props) {
     const result = await triggerSync();
     setSyncing(false);
     if (result.ok) {
+      // Step 2: Decoupling pipeline — run on activities synced since yesterday
+      try {
+        const yesterday = new Date();
+        yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+        const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+        const { data: recentActivities } = await supabase
+          .from('garmin_activities')
+          .select('activity_id')
+          .gte('start_time', yesterdayStr)
+          .order('start_time', { ascending: false });
+
+        const newActivityIds = (recentActivities ?? []).map(
+          (r: { activity_id: string | number }) => r.activity_id,
+        );
+
+        const decResult = await computeActivityDecouplingBatch(newActivityIds);
+        if (!decResult.ok) {
+          console.warn('[Sync] Decoupling batch failed:', decResult);
+        }
+      } catch (decErr: any) {
+        console.warn('[Sync] Decoupling batch error:', decErr?.message ?? decErr);
+      }
+
       await fetchActivities();
       fetchPMC();
     } else if (result.error?.toLowerCase().includes('reachable')) {
