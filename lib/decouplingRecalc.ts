@@ -51,6 +51,7 @@ export interface DecouplingRecalcResult {
   ok: boolean;
   skipped?: boolean;
   skip_reason?: string;
+  effort_tier?: EffortTier;
   error?: string;
 }
 
@@ -242,6 +243,7 @@ export async function computeActivityDecoupling(
       ok: true,
       skipped: result.skipped,
       skip_reason: result.skip_reason ?? undefined,
+      effort_tier: result.effort_tier,
     };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? 'Unknown error' };
@@ -282,30 +284,14 @@ export async function computeActivityDecouplingBatch(
 
       if (result.skipped) {
         skipped++;
-      } else {
-        // We need the effort_tier from the DB row we just upserted
-        // to know which tiers were affected. Fetch it back.
-        try {
-          const { data } = await supabase
-            .from('activity_decoupling')
-            .select('effort_tier')
-            .eq('activity_id', String(id))
-            .maybeSingle();
-          if (data?.effort_tier) {
-            affected_tiers.add(data.effort_tier as EffortTier);
-          }
-        } catch {
-          // best-effort; if we can't fetch the tier just skip
-        }
+      } else if (result.effort_tier) {
+        affected_tiers.add(result.effort_tier);
       }
     }
 
     // Recompute baselines and trends for all affected tiers
-    const tiersArray: EffortTier[] = affected_tiers.size > 0
-      ? Array.from(affected_tiers)
-      : undefined as any; // will use default inside each function
-
     if (affected_tiers.size > 0) {
+      const tiersArray = Array.from(affected_tiers);
       await recalculateDecouplingBaseline(tiersArray);
       await recalculateDecouplingTrend(tiersArray);
     }
