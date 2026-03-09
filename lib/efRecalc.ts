@@ -16,9 +16,9 @@ import {
   computeRollingEFAvg,
   computeEFRegression,
   detectEFAlert,
-  normalizeTempEF,
   type EFLapRecord,
 } from './ef';
+import { normalizeTempEF } from './envAdjust';
 import { resolveHRZones, type HRZones } from './hrZones';
 
 // ── Module constants ────────────────────────────────────────────────────────
@@ -65,6 +65,15 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
   try {
     // ── Step 1: Resolve HR zones ────────────────────────────────────────────
     const zones = await resolveHRZones();
+
+    // Read personal heat sensitivity coefficient (default 0.02 if not yet fitted)
+    const { data: paramsRow } = await supabase
+      .from('athlete_parameters')
+      .select('heat_sensitivity_k')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('sport', 'run')
+      .maybeSingle();
+    const heatK: number = paramsRow?.heat_sensitivity_k ?? 0.02;
 
     // ── Step 2: Fetch run activities ────────────────────────────────────────
     let activitiesQuery = supabase
@@ -155,11 +164,35 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
           avgTempC: actRow.avg_temperature ?? null,
         });
 
-        // 3f. Temperature normalization — stub; store temp_adjusted = false and
-        //     ef_temp_adjusted = null (do not persist the stub's return value).
-        void normalizeTempEF(efResult.efValue, actRow.avg_temperature ?? 15);
+        // 3f. Fetch weather data for this activity (if available)
+        const { data: weatherRow } = await supabase
+          .from('activity_weather')
+          .select('temperature_celsius, humidity_pct, elevation_m')
+          .eq('activity_id', String(actRow.activity_id))
+          .maybeSingle();
 
-        // 3g. Upsert to activity_ef
+        // 3g. Apply environmental normalization
+        // Open-Meteo temperature takes precedence; device temp is fallback only.
+        const tempForNorm = weatherRow?.temperature_celsius ?? actRow.avg_temperature ?? null;
+        let tempAdjusted = false;
+        let efTempAdjusted: number | null = null;
+
+        if (tempForNorm !== null && efResult.efValue > 0) {
+          const normResult = normalizeTempEF(
+            efResult.efValue,
+            tempForNorm,
+            weatherRow?.humidity_pct ?? null,
+            weatherRow?.elevation_m ?? null,
+            heatK,
+          );
+          // Store efAltAdj: the fully-normalized EF (temperature + humidity + altitude combined).
+          // ef_temp_adjusted is the column name inherited from the Section 7 stub, but semantically
+          // it holds the complete environmental normalization. Always use efAltAdj here, not efTempAdj.
+          efTempAdjusted = normResult.efAltAdj;
+          tempAdjusted = true;
+        }
+
+        // 3h. Upsert to activity_ef
         const { error: upsertErr } = await supabase
           .from('activity_ef')
           .upsert(
@@ -173,8 +206,8 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
               qualifying: qualifyingResult.qualifying,
               disqualification_reason: qualifyingResult.reason ?? null,
               temp_c: actRow.avg_temperature ?? null,
-              temp_adjusted: false,
-              ef_temp_adjusted: null,
+              temp_adjusted: tempAdjusted,
+              ef_temp_adjusted: efTempAdjusted,
             },
             { onConflict: 'athlete_id,activity_id' },
           );
@@ -327,13 +360,9 @@ export async function recalculateEF(fromDate?: string): Promise<EFRecalcResult> 
 /**
  * Backfill EF temperature adjustment across all activity_ef rows.
  *
- * When Section 21 delivers the normalization model:
- *   1. Query all activity_ef rows where temp_adjusted = false AND temp_c IS NOT NULL
- *   2. Call normalizeTempEF(ef_value, temp_c) -- which will no longer be a stub
- *   3. Update ef_temp_adjusted and set temp_adjusted = true
- *
- * This function is a stub -- it is a no-op until Section 21 ships.
- * TODO (Section 21): implement body.
+ * Queries all activity_ef rows where temp_adjusted = false AND temp_c IS NOT NULL,
+ * applies environmental normalization using normalizeTempEF() from envAdjust.ts,
+ * and upserts ef_temp_adjusted and temp_adjusted = true.
  */
 export async function backfillEFWithTempAdjustment(): Promise<{
   ok: boolean;
@@ -341,7 +370,103 @@ export async function backfillEFWithTempAdjustment(): Promise<{
   error?: string;
 }> {
   try {
-    return { ok: true, count: 0 };
+    // Read personal heat coefficient (default 0.02 if not yet fitted)
+    const { data: paramsRow } = await supabase
+      .from('athlete_parameters')
+      .select('heat_sensitivity_k')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('sport', 'run')
+      .maybeSingle();
+
+    const heatK: number = paramsRow?.heat_sensitivity_k ?? 0.02;
+
+    // Query activity_ef rows that need backfilling:
+    // temp_adjusted = false AND temp_c IS NOT NULL
+    const { data: efRows, error: efErr } = await supabase
+      .from('activity_ef')
+      .select('activity_id, ef_value, temp_c')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('temp_adjusted', false)
+      .not('temp_c', 'is', null);
+
+    if (efErr) throw efErr;
+
+    const rows = efRows ?? [];
+    if (rows.length === 0) return { ok: true, count: 0 };
+
+    // Fetch all matching activity_weather rows in one query
+    const activityIds = rows.map((r: any) => r.activity_id);
+    const { data: weatherRows, error: weatherErr } = await supabase
+      .from('activity_weather')
+      .select('activity_id, temperature_celsius, humidity_pct, elevation_m')
+      .in('activity_id', activityIds);
+
+    if (weatherErr) throw weatherErr;
+
+    // Build weather lookup map
+    const weatherMap = new Map<string, {
+      temperature_celsius: number | null;
+      humidity_pct: number | null;
+      elevation_m: number | null;
+    }>();
+    for (const w of weatherRows ?? []) {
+      weatherMap.set(w.activity_id, w);
+    }
+
+    // Build update rows
+    const updateRows: Array<{
+      activity_id: string;
+      ef_temp_adjusted: number;
+      temp_adjusted: boolean;
+    }> = [];
+
+    for (const efRow of rows) {
+      // Skip rows with null or zero ef_value (defensive guard)
+      if (!efRow.ef_value || efRow.ef_value <= 0) continue;
+
+      const weather = weatherMap.get(efRow.activity_id);
+      const tempForNorm = weather?.temperature_celsius ?? efRow.temp_c;
+
+      // tempForNorm cannot be null here (temp_c IS NOT NULL in query)
+      if (tempForNorm === null) continue;
+
+      const normResult = normalizeTempEF(
+        efRow.ef_value,
+        tempForNorm,
+        weather?.humidity_pct ?? null,
+        weather?.elevation_m ?? null,
+        heatK,
+      );
+
+      // Use efAltAdj: the fully-normalized EF (temperature + humidity + altitude).
+      // Consistent with recalculateEF step 3g — both paths must assign efAltAdj to ef_temp_adjusted.
+      updateRows.push({
+        activity_id: efRow.activity_id,
+        ef_temp_adjusted: normResult.efAltAdj,
+        temp_adjusted: true,
+      });
+    }
+
+    // Upsert in batches of 500
+    let count = 0;
+    for (let i = 0; i < updateRows.length; i += BATCH_SIZE) {
+      const chunk = updateRows.slice(i, i + BATCH_SIZE);
+      const { error: upsertErr } = await supabase
+        .from('activity_ef')
+        .upsert(
+          chunk.map((r) => ({
+            athlete_id: SINGLE_ATHLETE_ID,
+            activity_id: r.activity_id,
+            ef_temp_adjusted: r.ef_temp_adjusted,
+            temp_adjusted: r.temp_adjusted,
+          })),
+          { onConflict: 'athlete_id,activity_id' },
+        );
+      if (upsertErr) throw upsertErr;
+      count += chunk.length;
+    }
+
+    return { ok: true, count };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? 'Unknown error' };
   }

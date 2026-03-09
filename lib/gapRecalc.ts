@@ -20,6 +20,7 @@ import {
 } from './gap';
 import { backfillDecouplingWithGAP } from './decouplingRecalc';
 import { recalculateEF } from './efRecalc';
+import { recalculateWeather } from './weatherRecalc';
 
 // ── Module constants ───────────────────────────────────────────────────────────
 
@@ -178,6 +179,8 @@ export async function computeGAPBatch(activityIds: string[]): Promise<BatchGAPRe
 
     await triggerEFRecalc(/* fromDate is not passed here; recalculate all */);
 
+    await triggerWeatherRecalc();
+
     return { ok: true, processed, skipped, errors, backfill_triggered };
   } catch (e: any) {
     return {
@@ -223,6 +226,24 @@ export async function triggerDecouplingBackfill(): Promise<{
   try {
     const result = await backfillDecouplingWithGAP();
     return result;
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
+}
+
+// ── ENV-003: Weather recalculation delegation ─────────────────────────────────
+
+/**
+ * Delegates to recalculateWeather() from weatherRecalc.ts.
+ * Does not duplicate any logic — thin wrapper for error isolation only.
+ */
+export async function triggerWeatherRecalc(fromDate?: string): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  try {
+    const result = await recalculateWeather(fromDate);
+    return { ok: result.ok, error: result.error };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? 'Unknown error' };
   }

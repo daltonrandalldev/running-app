@@ -239,21 +239,3 @@ export function detectEFAlert(
   return Math.abs(avg30d - avg90d) / avg90d > threshold;
 }
 
-/**
- * Normalize EF for temperature effects.
- * STUB — returns ef unchanged pending Section 21 model fitting.
- */
-export function normalizeTempEF(
-  ef: number,
-  tempC: number,
-  refTempC = 15,
-): number {
-  // TODO (Section 21): implement normalization.
-  // Suggested signature for the final implementation:
-  //   normalizeTempEF(ef, tempC, refTempC) → ef_normalized
-  //   using model: ef_adjusted = ef / (1 + k * (tempC - refTempC))
-  //   where k is a fitted per-athlete coefficient from Section 21.
-  // Reference: Ely et al. (2007) ~1% HR increase per 1°C above 10°C at threshold intensity.
-  void tempC; void refTempC;
-  return ef;
-}

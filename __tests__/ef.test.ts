@@ -12,9 +12,10 @@ import {
   computeRollingEFAvg,
   computeEFRegression,
   detectEFAlert,
-  normalizeTempEF,
   type EFLapRecord,
 } from '../lib/ef.ts';
+
+import { normalizeTempEF } from '../lib/envAdjust.ts';
 
 import type { HRZones } from '../lib/hrZones.ts';
 
@@ -450,26 +451,35 @@ assert(detectEFAlert(NaN, 0.030) === false, 'NaN avg30d → false');
   assert(detectEFAlert(avg30d, avg90d, 0.05) === false, `3% with threshold=0.05 → false`);
 }
 
-// ── normalizeTempEF (stub) ────────────────────────────────────────────────────
+// ── normalizeTempEF (real implementation from envAdjust) ─────────────────────
 
 console.log();
-console.log('normalizeTempEF (stub) tests');
+console.log('normalizeTempEF (envAdjust) tests');
 
-// Any numeric inputs → returns ef unchanged
+// Cool, sea-level run: performanceFactor = 1.0, altitudeFactor = 1.0 → all outputs equal ef
 {
   const ef = 0.03142;
-  assert(normalizeTempEF(ef, 25, 15) === ef, `normalizeTempEF(${ef}, 25, 15) = ${ef} (pass-through)`);
-  assert(normalizeTempEF(ef, 0, 15) === ef, `normalizeTempEF(${ef}, 0, 15) = ${ef} (pass-through)`);
-  assert(normalizeTempEF(ef, 35, 20) === ef, `normalizeTempEF(${ef}, 35, 20) = ${ef} (pass-through)`);
+  const result = normalizeTempEF(ef, 10, null, null);
+  assert(near(result.efTempAdj, ef, 1e-12), `Cool run: efTempAdj = ${result.efTempAdj} = ef`);
+  assert(near(result.efAltAdj, ef, 1e-12), `Cool run: efAltAdj = ${result.efAltAdj} = ef`);
+  assert(near(result.performanceFactor, 1.0, 1e-12), `Cool run: performanceFactor = 1.0`);
+  assert(near(result.altitudeFactor, 1.0, 1e-12), `Cool run: altitudeFactor = 1.0`);
 }
 
-// Changing tempC and refTempC does not alter return value
+// Hot run (30°C, no humidity): performanceFactor < 1.0 → efTempAdj > ef
 {
-  const ef = 0.02900;
-  const r1 = normalizeTempEF(ef, 10, 15);
-  const r2 = normalizeTempEF(ef, 30, 15);
-  const r3 = normalizeTempEF(ef, 10, 25);
-  assert(r1 === ef && r2 === ef && r3 === ef, 'Changing tempC/refTempC does not change return value');
+  const ef = 0.03000;
+  const result = normalizeTempEF(ef, 30, null, null, 0.02);
+  assert(result.performanceFactor < 1.0, `Hot run: performanceFactor < 1.0 (got ${result.performanceFactor})`);
+  assert(result.efTempAdj > ef, `Hot run: efTempAdj (${result.efTempAdj}) > ef (${ef})`);
+}
+
+// High elevation (2000m): altitudeFactor < 1.0 → efAltAdj > efTempAdj
+{
+  const ef = 0.03000;
+  const result = normalizeTempEF(ef, 10, null, 2000, 0.02);
+  assert(result.altitudeFactor < 1.0, `High elevation: altitudeFactor < 1.0 (got ${result.altitudeFactor})`);
+  assert(result.efAltAdj > result.efTempAdj, `High elevation: efAltAdj > efTempAdj`);
 }
 
 // ── Regression Fixture ────────────────────────────────────────────────────────
