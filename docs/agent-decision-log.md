@@ -450,3 +450,123 @@ Easy aerobic run data for a single athlete is inherently sparse — at most a fe
 **Impact:**
 - PRD: Section 7.3 adaptive baseline requirement updated to specify linear regression only; polynomial regression removed as an option in the initial spec; TODO extension point noted
 - TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — Altitude Adjustment Applied to All Outdoor Runs
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** [UNKNOWN] marker in Section 21.4 asking whether to apply altitude adjustment to all local runs or only high-elevation (mountain) runs
+
+**Decision:**
+Altitude adjustment is applied to all outdoor activities. The Open-Meteo API elevation field (returned for every lat/lng query) is used as the activity's altitude. There is no manual threshold gate based on activity type or location label. The formula applies whenever elevation > 1500m, which means essentially all Englewood, CO outdoor runs (~1,646m) receive a ~0.9% pace adjustment.
+
+**Rationale:**
+At 1,646m, Englewood sits 146m above the 1,500m threshold. The altitude_factor at base elevation is approximately 0.991 — a small but real and consistent effect that, if ignored, systematically biases every local activity's EF upward relative to sea-level comparisons. Using Open-Meteo elevation (already fetched per activity) avoids any hardcoded lookup table and correctly captures runs at higher elevations (mountain trails above 2,000m, 3,000m, etc.) on the same formula path. Applying it uniformly is also more scientifically transparent: the athlete and any downstream tooling can see that the adjustment was made rather than silently omitting it because the base is "close to" the threshold.
+
+**Impact:**
+- PRD: [UNKNOWN] marker removed from Section 21.4; requirement table updated to specify altitude adjustment applied to all outdoor runs using Open-Meteo elevation; Appendix B open-questions entry marked resolved
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — Temperature Formula: Linear performance_factor Is Authoritative
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** Formula conflict between two versions of Section 21.3 — early draft used quadratic `0.003 × (T - 15)^2`; later "Temperature Performance Adjustment Formula" subsection used linear `1 - 0.02 × (T - 15) / 10`
+
+**Decision:**
+The linear performance_factor formula (`performance_factor = 1 - 0.02 × (T - 15) / 10`) is the authoritative implementation target. The quadratic formula from the earlier draft is superseded and removed from active use. A note in Section 21.3 explicitly documents the supersession for future readers.
+
+**Rationale:**
+The linear formula was written as a standalone specification subsection with a full citation (Ely et al., 2007) and a specific calibration path (3+ comparable-effort sessions at different temperatures). The earlier quadratic formula was presented as "a simplified model" with a forward reference to incorporate humidity — it was a placeholder. The linear form is also more amenable to personal calibration: the coefficient 0.02 is directly interpretable as "2% performance loss per 10°C above 15°C" and can be fit to individual data by adjusting a single scalar. The quadratic form requires fitting a curve exponent, which demands more data and is less transparent.
+
+**Impact:**
+- PRD: Section 21.3 rewritten with a single authoritative formula; quadratic formula removed from active spec; note added documenting supersession; EF normalization formula `ef_temp_adjusted = ef_raw / performance_factor` added explicitly
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — Primary Deliverable Is EF Normalization
+
+**Type:** Scope Change
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** PRD ambiguity — Section 21 mentioned pace adjustment, HR adjustment, and EF normalization without specifying which is the primary output; existing stubs in lib/ef.ts and lib/efRecalc.ts point to EF normalization
+
+**Decision:**
+The primary deliverable of Section 21 is EF normalization: implementing `normalizeTempEF()` in `lib/ef.ts` and `backfillEFWithTempAdjustment()` in `lib/efRecalc.ts`. The `activity_ef` table already has `temp_c`, `temp_adjusted`, and `ef_temp_adjusted` columns specifically for this purpose. Raw HR adjustment is stored in `activity_weather` for reference but is not the driver of downstream analytics. Raw pace adjustment is implicit in the EF formula (EF = speed/HR; adjusting EF for temperature and altitude is equivalent to normalizing pace and HR together).
+
+**Rationale:**
+The stubs were placed in lib/ef.ts and lib/efRecalc.ts in a prior section specifically anticipating Section 21 delivery. The schema was pre-built with `ef_temp_adjusted`. These design artifacts make EF normalization the clear integration point. Framing Section 21 as "raw pace/HR adjustment" would require new columns on garmin_activities and a new interpretation layer, whereas EF normalization slots directly into the existing architecture with zero schema changes to activity-level tables.
+
+**Impact:**
+- PRD: Section 21.3 updated to explicitly state EF normalization is the primary deliverable; requirement table updated to reference normalizeTempEF and backfillEFWithTempAdjustment stubs
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — activity_weather Table Is the Weather Storage Home
+
+**Type:** Technical Decision
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** PRD required storing temperature, humidity, wind per activity but did not name the table
+
+**Decision:**
+A new `activity_weather` table (one row per activity) stores all Open-Meteo weather results: `temperature_celsius`, `humidity_pct`, `wind_speed_kmh`, `wind_direction_deg`, `elevation_m`, `mid_run_temp_delta`, and `used_segment_adjustment`. No weather columns are added to `garmin_activities`.
+
+**Rationale:**
+Follows the pattern established by Section 5 (activity_decoupling), Section 6 (activity_gap, lap_gap), and Section 7 (activity_ef) — derived analytical outputs go in dedicated tables, not back onto the source activity record. `garmin_activities` is a sync mirror of GarminDB; adding weather columns to it would conflate source data with derived data. A dedicated table also enables the weather fetch pipeline to be re-run independently of the EF calculation.
+
+**Impact:**
+- PRD: Section 21.4 updated to name activity_weather as the storage table and enumerate its columns
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — Indoor Activities Skipped; start_lat/start_lng Are the API Coordinates
+
+**Type:** Technical Decision
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** PRD did not specify how to handle activities with no GPS coordinates (indoor treadmill runs, trainer rides) or which coordinates to pass to the Open-Meteo API
+
+**Decision:**
+`garmin_activities.start_lat` and `garmin_activities.start_lng` are the GPS coordinates used for Open-Meteo API calls. Activities where either field is NULL are skipped entirely: no weather fetch, no temperature or altitude adjustment applied, `activity_weather` row is not created for those activities.
+
+**Rationale:**
+Indoor activities (treadmill, trainer) have no meaningful outdoor environmental context — applying a temperature or altitude adjustment to a controlled indoor session would be incorrect. The NULL coordinate check is the natural gate: it is already the signal used elsewhere in the codebase to distinguish outdoor from indoor activities. Using start coordinates is the correct choice (weather conditions at the start of the run are the best single-point proxy for conditions throughout most runs, and Open-Meteo's historical hourly resolution captures mid-run changes via the segment adjustment logic).
+
+**Impact:**
+- PRD: Section 21.4 updated to specify start_lat/start_lng as API coordinates; NULL coordinate skip behavior documented in requirement table
+- TDD: none — TDD not yet written
+
+---
+
+## [2026-03-08] Section 21 — Open-Meteo Elevation Field Is the Altitude Source
+
+**Type:** Technical Decision
+**Phase:** Phase 1
+**Section:** Section 21
+**Agent:** TPM Agent
+**Triggered by:** PRD referenced "GPS altitude > 1500m average" but garmin_activity_laps only has relative ascent/descent columns (not absolute elevation); garmin_activities has no avg_altitude column
+
+**Decision:**
+The `elevation` field returned by Open-Meteo for the activity's lat/lng query coordinates is used as the activity's altitude in meters. This value is stored as `elevation_m` in `activity_weather`. The altitude adjustment formula uses this value. No attempt is made to reconstruct absolute altitude from relative `ascent`/`descent` lap deltas.
+
+**Rationale:**
+Open-Meteo returns a static elevation value for any lat/lng point based on a digital elevation model. This is the correct altitude for the activity's location and is available with zero additional API calls (it is part of every existing weather query). By contrast, reconstructing absolute altitude from cumulative `ascent`/`descent` would require knowing the starting elevation — which is the very value we need — creating a circular dependency. The DEM-based elevation from Open-Meteo is also more accurate than GPS barometric altitude for location-based comparisons.
+
+**Impact:**
+- PRD: Section 21.4 updated to specify Open-Meteo elevation field as altitude source; "GPS altitude" language replaced with "Open-Meteo elevation_m"; elevation_m added to activity_weather column list
+- TDD: none — TDD not yet written
