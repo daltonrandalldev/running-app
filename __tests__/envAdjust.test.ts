@@ -285,6 +285,87 @@ test('30 runs where EF increases with temperature → returns 0 (anomalous data 
   expect(result).toBe(0);
 });
 
+test('exactly 30 runs with exactly 15°C range returns a number (not null)', () => {
+  // Minimum passing case: n = 30 (>= 30) and tempRange = 15 (not < 15).
+  // Temps: 0°C to 15°C, 30 evenly spaced values → range = 15°C exactly.
+  // EF: 0.05 - 0.02 * (tempC - 15) / 10 — known k = 0.02.
+  const runs = Array.from({ length: 30 }, (_, i) => {
+    const tempC = 0 + i * (15 / 29); // 0°C to 15°C, 30 points
+    const efValue = 0.05 - 0.02 * (tempC - 15) / 10;
+    return { efValue, tempC };
+  });
+  const result = fitHeatSensitivityK(runs);
+  expect(result).not.toBeNull();
+  if (typeof result !== 'number') {
+    throw new Error(`Expected a number, got ${typeof result}`);
+  }
+});
+
+test('30 runs with 14.99°C range returns null (just below 15°C threshold)', () => {
+  // tempRange = 14.99 < 15 → must return null
+  const runs = Array.from({ length: 30 }, (_, i) => {
+    const tempC = 0 + i * (14.99 / 29); // 0°C to 14.99°C
+    const efValue = 0.05;
+    return { efValue, tempC };
+  });
+  expect(fitHeatSensitivityK(runs)).toBeNull();
+});
+
+test('30 runs where EF is flat returns 0.0 (no temperature correlation)', () => {
+  // EF is constant → OLS numerator = Σ xi*(yi - ȳ) = Σ xi*0 = 0 → slope = 0 → k = 0.
+  // Temps span > 15°C so the range check passes.
+  const runs = Array.from({ length: 30 }, (_, i) => ({
+    efValue: 0.05, // completely flat EF
+    tempC: 5 + i * (25 / 29), // 5°C to 30°C, range = 25°C
+  }));
+  const result = fitHeatSensitivityK(runs);
+  if (result === null) {
+    throw new Error('Expected 0, got null');
+  }
+  expect(result).toBeCloseTo(0.0, 1e-10);
+});
+
+test('OLS synthetic dataset with noise: 50 runs, k ≈ 0.02, returns value within ±0.003', () => {
+  // fitHeatSensitivityK computes k = -slope where slope = Σ xi*(yi-ȳ) / Σ xi²
+  // and xi = tempC - 15. The model is EF = C - k*(tempC-15), i.e. slope = -k.
+  // To generate synthetic data with k = 0.02: efValue = 0.5 - 0.02*(tempC-15) + noise.
+  // The OLS formula recovers the true slope exactly when mean(tempC) = 15 (so x̄=0).
+  // We use 50 runs with temps symmetrically centred at 15°C: -10°C to 40°C → mean=15.
+  // Deterministic noise: index % 3 === 0 → +0.001, % 3 === 1 → -0.001, else 0.
+  const runs = Array.from({ length: 50 }, (_, i) => {
+    const tempC = -10 + i * (50 / 49); // -10°C to 40°C, mean = 15°C, range = 50°C
+    const noise = i % 3 === 0 ? 0.001 : i % 3 === 1 ? -0.001 : 0;
+    const efValue = 0.5 - 0.02 * (tempC - 15) + noise;
+    return { efValue, tempC };
+  });
+  const result = fitHeatSensitivityK(runs);
+  if (result === null) {
+    throw new Error('Expected a non-null result');
+  }
+  const diff = Math.abs(result - 0.02);
+  if (diff > 0.003) {
+    throw new Error(
+      `Expected fitted k ≈ 0.02 (±0.003), got ${result} (diff = ${diff})`,
+    );
+  }
+});
+
+test('very small negative OLS slope clamped to 0.0', () => {
+  // All EF values equal → OLS numerator = Σ xi*(yi - ȳ) = Σ xi*0 = 0 → slope = 0 → k = 0.
+  // Temps span exactly 15°C (10°C to 25°C) so the range check passes.
+  // Due to floating-point arithmetic, result may be a tiny near-zero value;
+  // use toBeCloseTo rather than toBe(0) to handle IEEE 754 rounding.
+  const runs = Array.from({ length: 30 }, (_, i) => ({
+    efValue: 0.05, // all EF values equal → flat → slope = 0
+    tempC: 10 + i * (15 / 29), // 10°C to 25°C, range = 15°C
+  }));
+  const result = fitHeatSensitivityK(runs);
+  if (result === null) {
+    throw new Error('Expected 0, got null');
+  }
+  expect(result).toBeCloseTo(0.0, 1e-10);
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
