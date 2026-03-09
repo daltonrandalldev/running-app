@@ -47,6 +47,12 @@ export interface RecalcAllResult {
   combined: RecalcResult;
 }
 
+export interface AlertResult {
+  ok: boolean;
+  alertsEmitted?: number;
+  error?: string;
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 function earliestAllowedDate(): string {
@@ -54,6 +60,25 @@ function earliestAllowedDate(): string {
   d.setUTCDate(d.getUTCDate() - MAX_BACKFILL_DAYS);
   return d.toISOString().slice(0, 10);
 }
+
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function subtractDays(isoDate: string, days: number): string {
+  const d = new Date(isoDate + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Alert message templates ───────────────────────────────────────────────────
+
+const ALERT_MESSAGES = {
+  High: (monotony: number, strain: number) =>
+    `Training monotony is high (${monotony.toFixed(2)}) and strain (${Math.round(strain)}) exceeds your 90-day average by 50%. Consider adding an easy or rest day.`,
+  Medium: (monotony: number) =>
+    `Training monotony is approaching a high level (${monotony.toFixed(2)}). Varying session intensity can reduce overtraining risk.`,
+};
 
 // ── Main exports ──────────────────────────────────────────────────────────────
 
@@ -157,4 +182,130 @@ export async function recalculateAllMonotonySports(
     recalculateMonotony(fromDate, 'combined'),
   ]);
   return { run, cycle, combined };
+}
+
+/**
+ * Check today's combined-series monotony/strain values and emit an alert to
+ * athlete_notifications if thresholds are exceeded.
+ *
+ * Severity levels:
+ *   - 'High':   monotony >= 2.0 AND strain > avg_90d_strain * 1.5
+ *               AND >= 90 prior combined-series rows exist in daily_monotony_strain.
+ *   - 'Medium': monotony >= 1.8 AND monotony < 2.0 (informational early warning;
+ *               no strain threshold required).
+ *   - No alert: monotony < 1.8 OR monotony IS NULL.
+ *
+ * @param asOfDate  ISO date (YYYY-MM-DD) to evaluate. Defaults to today.
+ */
+export async function checkAndEmitAlerts(
+  asOfDate?: string,
+): Promise<AlertResult> {
+  // Per-sport (run/cycle) alerting is explicitly deferred — see docs/output/section-4-tech-design.md §10.5
+  try {
+    const targetDate = asOfDate ?? todayISO();
+
+    // Step 1: Fetch today's combined-series row
+    const { data: todayRow, error: fetchErr } = await supabase
+      .from('daily_monotony_strain')
+      .select('monotony, strain')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('date', targetDate)
+      .eq('sport', 'combined')
+      .maybeSingle();
+
+    if (fetchErr) throw fetchErr;
+
+    // NULL monotony (stdev=0 or partial window) never triggers an alert
+    if (!todayRow || todayRow.monotony === null) {
+      return { ok: true, alertsEmitted: 0 };
+    }
+
+    const monotony: number = todayRow.monotony;
+    const strain: number = todayRow.strain;
+
+    // Step 2: Check monotony threshold — exit early if below minimum
+    if (monotony < 1.8) {
+      return { ok: true, alertsEmitted: 0 };
+    }
+
+    let severity: 'High' | 'Medium' | null = null;
+
+    if (monotony >= 2.0) {
+      // Step 3: High alert requires 90+ rows of prior combined strain history
+      // "90 rows" = 90 rows in daily_monotony_strain where sport='combined'
+      // NOT 90 calendar days. AVG() excludes NULLs automatically.
+      const { data: historyRow, error: histErr } = await supabase
+        .from('daily_monotony_strain')
+        .select('strain')
+        .eq('athlete_id', SINGLE_ATHLETE_ID)
+        .eq('sport', 'combined')
+        .gte('date', subtractDays(targetDate, 89))
+        .lt('date', targetDate)
+        .not('strain', 'is', null);
+
+      if (histErr) throw histErr;
+
+      const priorRows = historyRow ?? [];
+      const dayCount = priorRows.length;
+
+      if (dayCount >= 90) {
+        const avgStrain90d =
+          priorRows.reduce((sum: number, r: { strain: number }) => sum + r.strain, 0) / dayCount;
+        const threshold = avgStrain90d * 1.5;
+
+        if (strain > threshold) {
+          severity = 'High';
+        }
+      }
+      // If dayCount < 90: no High alert fires — insufficient history
+    } else {
+      // monotony in [1.8, 2.0): Medium warning, no strain threshold required
+      severity = 'Medium';
+    }
+
+    if (severity === null) {
+      return { ok: true, alertsEmitted: 0 };
+    }
+
+    // Step 4: Deduplication — skip if an alert of the same type was already
+    // emitted for this athlete on this date
+    const { data: existing, error: dedupErr } = await supabase
+      .from('athlete_notifications')
+      .select('id')
+      .eq('athlete_id', SINGLE_ATHLETE_ID)
+      .eq('type', 'high_monotony_strain')
+      .eq('confidence_label', severity)
+      .gte('created_at', targetDate + 'T00:00:00Z')
+      .lt('created_at', targetDate + 'T23:59:59.999Z')
+      .limit(1);
+
+    if (dedupErr) throw dedupErr;
+    if (existing && existing.length > 0) {
+      return { ok: true, alertsEmitted: 0 }; // already emitted today
+    }
+
+    // Step 5: Insert notification
+    const message =
+      severity === 'High'
+        ? ALERT_MESSAGES.High(monotony, strain)
+        : ALERT_MESSAGES.Medium(monotony);
+
+    const { error: insertErr } = await supabase
+      .from('athlete_notifications')
+      .insert({
+        athlete_id: SINGLE_ATHLETE_ID,
+        sport: 'combined',
+        type: 'high_monotony_strain',
+        message,
+        confidence_label: severity,
+        r_squared: null,
+        ci_width: null,
+      });
+
+    if (insertErr) throw insertErr;
+
+    return { ok: true, alertsEmitted: 1 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Unknown error' };
+  }
 }
