@@ -2227,110 +2227,151 @@ and in heat, confounding HR-based training intensity.
 
 ## 21.3 Calculation Specification
 
-**Heat adjustment (running pace):**
+**Primary deliverable: EF normalization.** Section 21 implements
+temperature- and altitude-adjusted EF by filling the stubs in
+`lib/ef.ts` (`normalizeTempEF`) and `lib/efRecalc.ts`
+(`backfillEFWithTempAdjustment`). The `activity_ef` table already
+contains `temp_c`, `temp_adjusted`, and `ef_temp_adjusted` columns for
+this purpose. Raw pace and HR adjustment values are stored as
+intermediate outputs but EF normalization is the primary analytical
+output consumed by the rest of the system.
 
-> pace_adjustment_pct = 0.003 \* (temp_C - 15)\^2 \[for temp \> 15°C\]
+**Temperature performance adjustment (authoritative formula):**
+
+Baseline reference temperature: 15°C. For temperatures above 15°C:
+
+> performance_factor = 1 - 0.02 × (T - 15) / 10
 >
-> adjusted_pace = actual_pace / (1 + pace_adjustment_pct)
+> ef_temp_adjusted = ef_raw / performance_factor
 
-This is a simplified quadratic model. For more precision, incorporate
-humidity via heat index or WBGT.
+Apply to EF (speed/HR) calculations. Calibrate to individual heat
+sensitivity after 3+ sessions with comparable effort at different
+temperatures. Source: Ely MR et al. (2007). "Impact of weather on
+marathon-running performance." Medicine and Science in Sports and
+Exercise 39(3):487-493.
 
-**HR adjustment for heat:**
+Note: An earlier draft of this section used a quadratic formula
+`0.003 × (T - 15)^2`. That formula is superseded by the linear
+performance_factor above. The linear form is more defensible for
+personal calibration and is the implementation target.
 
-> hr_adjusted = actual_hr - (0.5 \* (temp_C - 15)) \[for temp \> 15°C\]
+**HR adjustment for heat (stored, not used in EF normalization):**
 
-Approximately 0.5 bpm per degree Celsius above 15°C (individual
-variation significant).
+> hr_adjusted = actual_hr - (0.5 × (temp_C - 15)) [for temp > 15°C]
+
+Stored in `activity_weather` for reference. Approximately 0.5 bpm per
+degree Celsius above 15°C (individual variation significant).
 
 **Altitude adjustment:**
 
-> altitude_factor = 1 - 0.065 \* ((altitude_m - 1500) / 1000) \[for
-> altitude \> 1500m\]
+Open-Meteo returns an `elevation` field for every lat/lng query. This
+elevation value is used as the activity's altitude. The formula applies
+to all outdoor activities — there is no threshold gate. The athlete
+trains in Englewood, CO (~1,646m), which means essentially all local
+outdoor runs receive a small adjustment (~0.9% at base elevation).
+
+> altitude_factor = 1 - 0.065 × ((altitude_m - 1500) / 1000) [for altitude > 1500m; factor = 1.0 for altitude ≤ 1500m]
 >
-> sea_level_equivalent_pace = actual_pace \* altitude_factor
+> sea_level_equivalent_pace = actual_pace × altitude_factor
+>
+> ef_altitude_adjusted = ef_temp_adjusted × (1 / altitude_factor)
+
+**Humidity correction:**
+
+Apply heat index adjustment when humidity > 60% and temperature > 20°C.
+Use the Steadman (1979) heat index formula:
+
+> effective_temperature = temperature + (0.33 × humidity_partial_pressure) - 4.0
+
+When effective_temperature > temperature, substitute effective_temperature
+into the performance_factor formula in place of T.
 
 **Adaptive coefficients:**
 
-Track EF across temperature ranges. Fit a personal heat sensitivity
-curve. Some athletes degrade more than others in heat. After
-accumulating runs across a range of temperatures, fit the temperature
-coefficient to YOUR data.
+Track EF across temperature ranges. After accumulating 30+ outdoor runs
+spanning > 15°C temperature range, fit a personal heat sensitivity
+coefficient to replace the default 0.02 value. Updated quarterly.
 
-## 21.4 Requirements
-
-  -----------------------------------------------------------------------
-  **Requirement**                           **Acceptance Criteria**
-  ----------------------------------------- -----------------------------
-  Fetch and store weather data              Weather data from Open-Meteo
-  (temperature, humidity, wind) for every   or equivalent backfilled
-  outdoor activity                          using GPS + timestamp. Stored
-                                            per activity.
-
-  Calculate temperature-adjusted pace and   Adjustments applied using
-  HR for every outdoor run                  default model. Both raw and
-                                            adjusted values stored.
-
-  Apply altitude adjustment when GPS        Sea-level equivalent pace
-  altitude \>1500m average                  calculated. Flagged in
-                                            activity metadata.
-
-  Fit personal heat sensitivity coefficient After 30+ outdoor runs
-  from data                                 spanning \>15°C temperature
-                                            range, personal coefficient
-                                            fitted. Updated quarterly.
-  -----------------------------------------------------------------------
-
-**\[UNKNOWN\]** Do you train at altitude regularly? Englewood, CO is
-\~5,400 ft (1,646m), which is right at the threshold where altitude
-effects begin. Confirm if you want altitude adjustment applied to ALL
-local runs or only at higher elevations (e.g., mountain trail runs).
-Given your location, this might meaningfully affect all your outdoor
-data.
-
-21.1 Temperature Data Source --- Open-Meteo API (Mandatory)
+## 21.4 Data Source: Open-Meteo API (Mandatory)
 
 Device temperature data is explicitly PROHIBITED as the primary
 temperature source. Wrist-worn device temperature sensors are unreliable
-due to: radiant heat absorption, body heat proximity, and solar exposure
+due to radiant heat absorption, body heat proximity, and solar exposure
 variation.
 
 Mandatory temperature source: Open-Meteo API (open-meteo.com). This API
 is free, requires no API key, provides historical hourly weather data
 and forecasts, supports latitude/longitude queries, and returns
-temperature, humidity, wind speed, precipitation, and dew point.
+temperature, humidity, wind speed, precipitation, dew point, and
+elevation.
 
-Implementation: for each completed activity, fetch historical hourly
-weather from Open-Meteo using the activity\'s start GPS coordinates and
-start timestamp. Cache results to avoid repeated API calls for the same
-location/time. Store: temperature_celsius, humidity_pct, wind_speed_kmh,
-wind_direction_deg alongside each activity. Fallback (if API
-unavailable): null temperature fields --- never use device temperature
-as a fallback.
+Implementation: for each completed outdoor activity, fetch historical
+hourly weather from Open-Meteo using `garmin_activities.start_lat` and
+`garmin_activities.start_lng` as the query coordinates, and
+`garmin_activities.start_time` as the timestamp. Activities where
+`start_lat` IS NULL or `start_lng` IS NULL (indoor activities) are
+skipped entirely — no weather fetch, no adjustment applied.
 
-21.2 Seasonal and Mid-Run Temperature Changes
+The `elevation` field returned by Open-Meteo for the query lat/lng is
+used as the activity's altitude in meters. This is more reliable than
+attempting to reconstruct absolute altitude from the relative
+`ascent`/`descent` deltas in `garmin_activity_laps`.
 
-For activities where temperature changes significantly mid-run: if the
-Open-Meteo hourly temperature delta across the activity duration exceeds
-3°C, apply per-segment temperature adjustments rather than a single
-activity-level adjustment. Fetch hourly temperatures for each hour of
-the activity duration.
+Cache results to avoid repeated API calls for the same location/time.
+Fallback (if API unavailable): null all weather fields — never use
+device temperature as a fallback.
 
-21.3 Temperature Performance Adjustment Formula
+Results are stored in a new `activity_weather` table (one row per
+activity):
 
-Baseline reference temperature: 15°C. For temperatures above 15°C:
-performance factor = 1 - 0.02 x (T - 15) / 10. Apply to pace-based and
-power-based calculations. Calibrate to individual heat sensitivity after
-3+ sessions with comparable effort at different temperatures. Source:
-Ely MR et al. (2007). \"Impact of weather on marathon-running
-performance.\" Medicine and Science in Sports and Exercise
-39(3):487-493.
+- `temperature_celsius` — hourly temperature at activity start
+- `humidity_pct` — relative humidity
+- `wind_speed_kmh`
+- `wind_direction_deg`
+- `elevation_m` — Open-Meteo elevation for the query coordinates (used as altitude)
+- `mid_run_temp_delta` — temperature delta across activity duration (for segment adjustment flag)
+- `used_segment_adjustment` — boolean: true if per-segment adjustment was applied
 
-21.4 Humidity Correction
+**Mid-run temperature changes:** If the Open-Meteo hourly temperature
+delta across the activity duration exceeds 3°C, apply per-segment
+temperature adjustments rather than a single activity-level adjustment.
+Fetch hourly temperatures for each hour of the activity duration.
 
-Apply heat index adjustment when humidity \>60% and temperature \>20°C.
-Use the Steadman (1979) heat index formula. Effective temperature =
-temperature + (0.33 x humidity_partial_pressure) - 4.0.
+## 21.5 Requirements
+
+  -----------------------------------------------------------------------
+  **Requirement**                           **Acceptance Criteria**
+  ----------------------------------------- -----------------------------
+  Fetch and store weather data              For every outdoor activity
+  (temperature, humidity, wind, elevation)  (start_lat/start_lng NOT
+  for every outdoor activity                NULL): weather fetched from
+                                            Open-Meteo, stored in
+                                            activity_weather. Indoor
+                                            activities (NULL coords)
+                                            skipped.
+
+  Calculate temperature- and               Adjustments applied using
+  altitude-adjusted EF for every outdoor   authoritative linear formula.
+  run; fill normalizeTempEF and            Both ef_raw and
+  backfillEFWithTempAdjustment stubs        ef_temp_adjusted stored in
+                                            activity_ef.
+
+  Apply altitude adjustment using           elevation_m from Open-Meteo
+  Open-Meteo elevation data for all        stored per activity. Formula
+  outdoor runs                              applied for altitude > 1500m.
+                                            All Englewood-area runs
+                                            receive ~0.9% adjustment.
+
+  Apply humidity correction when           Effective temperature
+  humidity > 60% and temp > 20°C           substituted into
+                                            performance_factor formula
+                                            using Steadman (1979).
+
+  Fit personal heat sensitivity coefficient After 30+ outdoor runs
+  from data                                 spanning > 15°C temperature
+                                            range, personal coefficient
+                                            fitted. Updated quarterly.
+  -----------------------------------------------------------------------
 
 # 22. Race Performance Prediction
 
@@ -3262,8 +3303,7 @@ All \[REVIEW\] and \[UNKNOWN\] items consolidated for tracking:
 - \[UNKNOWN\] Garmin watch model and confirmed field availability
   (running dynamics, HRV format)
 
-- \[UNKNOWN\] Altitude adjustment scope given Englewood, CO base
-  elevation (\~5,400 ft)
+- ~~\[UNKNOWN\] Altitude adjustment scope given Englewood, CO base elevation (\~5,400 ft)~~ — RESOLVED 2026-03-08: altitude adjustment applied to all outdoor activities using Open-Meteo elevation data; no manual threshold gate.
 
 - \[REVIEW\] HRV metric format from GarminDB (RMSSD vs. proprietary
   score)
