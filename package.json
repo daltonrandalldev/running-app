@@ -7,7 +7,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "test": "node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmc.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmcFitting.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmcRecalc.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/gap.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/ef.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/envAdjust.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/weatherApi.test.ts"
+    "test": "node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmc.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmcFitting.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/pmcRecalc.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/gap.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/ef.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/envAdjust.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/weatherApi.test.ts && node --experimental-strip-types --no-warnings=MODULE_TYPELESS_PACKAGE_JSON __tests__/monotony.test.ts"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",
