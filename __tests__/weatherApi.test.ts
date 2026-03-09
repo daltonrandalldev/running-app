@@ -295,6 +295,8 @@ await test('two calls with same lat/lng/date → only one actual fetch (cache hi
   const mock = makeMockResponse();
   installMockFetch(mock);
 
+  // r1: starts at 07:30 UTC → hour index 7 → temps[7]
+  // r2: starts at 09:00 UTC → hour index 9 → temps[9]
   const r1 = await fetchActivityWeather(51.5, -0.12, '2024-06-15T07:30:00Z', 3600);
   const r2 = await fetchActivityWeather(51.5, -0.12, '2024-06-15T09:00:00Z', 3600);
 
@@ -306,6 +308,26 @@ await test('two calls with same lat/lng/date → only one actual fetch (cache hi
   }
   if (r1 === null || r2 === null) {
     throw new Error('Expected non-null results for valid mock responses');
+  }
+
+  // The cache stores raw JSON and re-parses per call, so each result must
+  // reflect its own start hour — temps[7] ≠ temps[9].
+  const expectedTemp1 = mock.hourly.temperature_2m[7]; // 07:00 hour
+  const expectedTemp2 = mock.hourly.temperature_2m[9]; // 09:00 hour
+  if (r1.temperatureCelsius !== expectedTemp1) {
+    throw new Error(
+      `r1.temperatureCelsius: expected ${expectedTemp1} (temps[7]), got ${r1.temperatureCelsius}`,
+    );
+  }
+  if (r2.temperatureCelsius !== expectedTemp2) {
+    throw new Error(
+      `r2.temperatureCelsius: expected ${expectedTemp2} (temps[9]), got ${r2.temperatureCelsius}`,
+    );
+  }
+  if (r1.temperatureCelsius === r2.temperatureCelsius) {
+    throw new Error(
+      `r1 and r2 should have DIFFERENT temperatures (different start hours), both got ${r1.temperatureCelsius}`,
+    );
   }
 });
 

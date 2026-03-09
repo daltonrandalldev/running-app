@@ -22,9 +22,6 @@ const SINGLE_ATHLETE_ID = '00000000-0000-0000-0000-000000000001';
 /** Batch size for upsert operations (matches gapRecalc.ts / efRecalc.ts pattern). */
 const BATCH_SIZE = 500;
 
-/** athlete_parameters key for the personal heat sensitivity coefficient. */
-const HEAT_SENSITIVITY_KEY = 'heat_sensitivity_k';
-
 // ── Return-type interfaces ────────────────────────────────────────────────────
 
 export interface WeatherRecalcResult {

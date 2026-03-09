@@ -17,8 +17,14 @@ export interface WeatherResult {
 
 // ── In-memory cache ───────────────────────────────────────────────────────────
 
+// Cache stores raw API JSON (not parsed results) so that the same response can
+// be re-parsed with different startTimeISO values (e.g. two activities on the
+// same day at different start hours). A failure sentinel avoids re-fetching
+// known-bad keys within the same pipeline run.
+type CacheEntry = { ok: true; json: unknown } | { ok: false };
+
 // Module-level cache (lives for the duration of a single pipeline run)
-const weatherCache = new Map<string, WeatherResult | null>();
+const weatherCache = new Map<string, CacheEntry>();
 
 function cacheKey(lat: number, lng: number, date: string): string {
   return `${lat},${lng},${date}`;
@@ -178,9 +184,13 @@ export async function fetchActivityWeather(
     const date = new Date(startTimeISO).toISOString().slice(0, 10);
     const key = cacheKey(lat, lng, date);
 
-    // Check cache (including null sentinel to avoid re-fetching known failures)
+    // Check cache (including failure sentinel to avoid re-fetching known failures)
     if (weatherCache.has(key)) {
-      return weatherCache.get(key) ?? null;
+      const entry = weatherCache.get(key)!;
+      if (!entry.ok) return null;
+      // Re-parse with THIS call's startTimeISO so that two activities on the
+      // same day at different hours each get the correct temperature slice.
+      return parseOpenMeteoResponse(entry.json, startTimeISO, durationSeconds);
     }
 
     // Build URL and fetch
@@ -189,12 +199,12 @@ export async function fetchActivityWeather(
     try {
       response = await fetch(url);
     } catch {
-      weatherCache.set(key, null);
+      weatherCache.set(key, { ok: false });
       return null;
     }
 
     if (!response.ok) {
-      weatherCache.set(key, null);
+      weatherCache.set(key, { ok: false });
       return null;
     }
 
@@ -202,13 +212,12 @@ export async function fetchActivityWeather(
     try {
       json = await response.json();
     } catch {
-      weatherCache.set(key, null);
+      weatherCache.set(key, { ok: false });
       return null;
     }
 
-    const result = parseOpenMeteoResponse(json, startTimeISO, durationSeconds);
-    weatherCache.set(key, result);
-    return result;
+    weatherCache.set(key, { ok: true, json });
+    return parseOpenMeteoResponse(json, startTimeISO, durationSeconds);
   } catch {
     return null;
   }
