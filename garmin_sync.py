@@ -36,6 +36,7 @@ import argparse
 import datetime
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
@@ -671,22 +672,19 @@ def main():
                 cur.execute("NOTIFY pgrst, 'reload schema'")
 
         # ── ING-004: daily_health sync ────────────────────────────────────────
-        # TODO: wire garmindb_conn — open a raw sqlite3.Connection to the GarminDB
-        # monitoring database (typically garmin.db at db_dir) and pass it below.
-        # Example:
-        #   import sqlite3
-        #   garmindb_monitoring_conn = sqlite3.connect(str(garmin_db_path))
-        # Once wired, uncomment the block below and remove this comment.
-        #
-        # garmindb_monitoring_conn = None  # replace with real sqlite3.Connection
-        # if garmindb_monitoring_conn is not None and synced_activity_dates:
-        #     logger.info("Syncing daily_health from GarminDB monitoring tables…")
-        #     for date_str in sorted(synced_activity_dates):
-        #         try:
-        #             sync_daily_health(garmindb_monitoring_conn, date_str)
-        #             logger.info("  ✓ daily_health upserted for %s", date_str)
-        #         except Exception as exc:
-        #             logger.warning("  daily_health upsert failed for %s: %s", date_str, exc)
+        if synced_activity_dates:
+            logger.info("Syncing daily_health from GarminDB monitoring tables…")
+            try:
+                garmindb_monitoring_conn = sqlite3.connect(str(garmin_db_path))
+                for date_str in sorted(synced_activity_dates):
+                    try:
+                        sync_daily_health(garmindb_monitoring_conn, date_str)
+                        logger.info("  ✓ daily_health upserted for %s", date_str)
+                    except Exception as exc:
+                        logger.warning("  daily_health upsert failed for %s: %s", date_str, exc)
+                garmindb_monitoring_conn.close()
+            except Exception as exc:
+                logger.warning("  daily_health sync skipped — could not open garmin.db: %s", exc)
 
         logger.info("")
         logger.info("── Sync complete ────────────────────────────────────────")
