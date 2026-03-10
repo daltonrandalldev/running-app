@@ -63,6 +63,8 @@ class SyncHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/sync":
             self._run_sync()
+        elif self.path == "/sync/intervals":
+            self._run_intervals_sync()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -105,6 +107,45 @@ class SyncHandler(BaseHTTPRequestHandler):
             print(f"[sync] {name} OK", flush=True)
 
         self._json({"ok": True, "results": results})
+
+    def _run_intervals_sync(self):
+        import json as _json
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = {}
+        if content_length > 0:
+            raw = self.rfile.read(content_length)
+            try:
+                body = _json.loads(raw)
+            except Exception:
+                body = {}
+
+        try:
+            from sync.intervals_adapter import (
+                fetch_activities, upsert_activities,
+                fetch_wellness, upsert_wellness,
+                _default_oldest, _today_iso,
+            )
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
+            return
+
+        oldest = body.get("oldest", _default_oldest())
+        newest = body.get("newest", _today_iso())
+
+        try:
+            activities = fetch_activities(oldest, newest)
+            wellness   = fetch_wellness(oldest, newest)
+            act_result  = upsert_activities(activities)
+            well_result = upsert_wellness(wellness)
+            self._json({
+                "ok": True,
+                "activities_upserted": act_result["count"],
+                "wellness_upserted":   well_result["count"],
+            })
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            self._json({"ok": False, "error": str(e)}, 500)
 
     def log_message(self, fmt, *args):
         print(f"[server] {fmt % args}", flush=True)
