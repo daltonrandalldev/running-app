@@ -16,7 +16,7 @@ import KeyMetricsScreen from './screens/KeyMetricsScreen';
 export type RootStackParamList = {
   MainTabs: undefined;
   KeyMetrics: undefined;
-  ActivityDetail: { activityId: number };
+  ActivityDetail: { activityId: string };
 };
 
 export type MainTabParamList = {

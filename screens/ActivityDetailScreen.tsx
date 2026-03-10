@@ -17,7 +17,7 @@ import {
 type Props = NativeStackScreenProps<RootStackParamList, 'ActivityDetail'>;
 
 type ActivityDetail = {
-  id: number;
+  id: string;
   name: string;
   start_time: string;
   activity_type: string | null;
@@ -141,7 +141,7 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
         .single();
       if (data) {
         setActivity({
-          id: parseInt(data.activity_id, 10),
+          id: data.activity_id,
           name: data.name,
           start_time: data.start_time,
           activity_type: data.sport,

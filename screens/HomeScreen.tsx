@@ -223,7 +223,7 @@ function PMCChart({
 }
 
 type Activity = {
-  id: number;
+  id: string;
   name: string;
   start_time: string;
   activity_type: string | null;
@@ -241,7 +241,7 @@ const GARMIN_ACTIVITY_SELECT =
 
 function toActivity(row: any): Activity {
   return {
-    id: parseInt(row.activity_id, 10),
+    id: row.activity_id,
     name: row.name,
     start_time: row.start_time,
     activity_type: row.sport,
