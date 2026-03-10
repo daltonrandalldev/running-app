@@ -67,6 +67,8 @@ try:
 except ImportError:
     sys.exit("Missing dependency — run: pip install garmindb")
 
+from sync.garmin_adapter import get_local_timezone, sync_daily_health
+
 # ── Suppress noisy urllib3 SSL warning ───────────────────────────────────────
 import warnings
 import urllib3
@@ -173,6 +175,8 @@ def _build_activity_row(act, steps: Optional[object], cycle: Optional[object]) -
         "avg_gct_balance":          None,
         "avg_ground_contact_time_ms": None,
         "avg_stance_time_percent":  None,
+        # ING-004: derive IANA timezone from start GPS; NULL for indoor activities
+        "local_timezone":           get_local_timezone(_f(act.start_lat), _f(act.start_long)),
     }
 
     if steps is not None:
@@ -627,6 +631,8 @@ def main():
             logger.info("No existing data in Supabase — syncing all data")
 
     total_activities = total_laps = total_summaries = total_sleep = 0
+    # ING-004: collect unique activity dates for daily_health sync (populated below)
+    synced_activity_dates: set[str] = set()
 
     try:
         with conn:
@@ -636,6 +642,15 @@ def main():
                 logger.info("Syncing garmin_activities…")
                 total_activities = sync_activities(act_db, cur, since_dt)
                 logger.info("  ✓ %d activities upserted", total_activities)
+
+                # Collect unique dates from the synced window for daily_health
+                with act_db.managed_session() as _session:
+                    _act_query = _session.query(Activities)
+                    if since_dt:
+                        _act_query = _act_query.filter(Activities.start_time >= since_dt)
+                    for _act in _act_query.all():
+                        if _act.start_time:
+                            synced_activity_dates.add(_act.start_time.date().isoformat())
 
                 # ── Laps (must follow activities — FK constraint) ─────────────
                 logger.info("Syncing garmin_activity_laps…")
@@ -654,6 +669,24 @@ def main():
 
                 # ── Notify PostgREST ──────────────────────────────────────────
                 cur.execute("NOTIFY pgrst, 'reload schema'")
+
+        # ── ING-004: daily_health sync ────────────────────────────────────────
+        # TODO: wire garmindb_conn — open a raw sqlite3.Connection to the GarminDB
+        # monitoring database (typically garmin.db at db_dir) and pass it below.
+        # Example:
+        #   import sqlite3
+        #   garmindb_monitoring_conn = sqlite3.connect(str(garmin_db_path))
+        # Once wired, uncomment the block below and remove this comment.
+        #
+        # garmindb_monitoring_conn = None  # replace with real sqlite3.Connection
+        # if garmindb_monitoring_conn is not None and synced_activity_dates:
+        #     logger.info("Syncing daily_health from GarminDB monitoring tables…")
+        #     for date_str in sorted(synced_activity_dates):
+        #         try:
+        #             sync_daily_health(garmindb_monitoring_conn, date_str)
+        #             logger.info("  ✓ daily_health upserted for %s", date_str)
+        #         except Exception as exc:
+        #             logger.warning("  daily_health upsert failed for %s: %s", date_str, exc)
 
         logger.info("")
         logger.info("── Sync complete ────────────────────────────────────────")
