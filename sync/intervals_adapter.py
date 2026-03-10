@@ -87,7 +87,7 @@ def find_duplicate(sport_type: str, start_time_utc: str, supabase: Client) -> st
     result = (
         supabase.table("garmin_activities")
         .select("activity_id")
-        .eq("sport_type", sport_type)
+        .eq("sport", sport_type)
         .gte("start_time", minus5)
         .lte("start_time", plus5)
         .limit(1)
@@ -167,7 +167,7 @@ def upsert_activities(activities: list[dict]) -> dict:
             supabase.table("garmin_activities").upsert({
                 "activity_id": new_id,
                 "source_platform": "intervals_icu",
-                "sport_type": sport_type,
+                "sport": sport_type,
                 "start_time": start_utc,
                 "local_timezone": tz,
                 "distance": act.get("distance"),
