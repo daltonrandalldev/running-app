@@ -49,7 +49,7 @@ def _today_iso() -> str:
 
 # ── HTTP helper ────────────────────────────────────────────────────────────────
 
-def _get(path: str, params: dict = None) -> dict | list:
+def _get(path: str, params: dict = None):
     athlete_id, api_key = _get_credentials()
     url = f"{INTERVALS_BASE}/athlete/{athlete_id}/{path}"
     auth = HTTPBasicAuth("API_KEY", api_key)
@@ -79,7 +79,7 @@ def already_ingested(intervals_activity_id: str, supabase: Client) -> bool:
     return len(result.data) > 0
 
 
-def find_duplicate(sport_type: str, start_time_utc: str, supabase: Client) -> str | None:
+def find_duplicate(sport_type: str, start_time_utc: str, supabase: Client):
     from dateutil import parser as dtparser
     dt = dtparser.parse(start_time_utc)
     minus5 = (dt - timedelta(minutes=5)).isoformat()
@@ -95,6 +95,11 @@ def find_duplicate(sport_type: str, start_time_utc: str, supabase: Client) -> st
     )
     rows = result.data
     return rows[0]["activity_id"] if rows else None
+
+
+def _to_int(v):
+    """Cast float to int for integer DB columns; pass through None."""
+    return int(v) if v is not None else None
 
 
 def _to_utc(start_date_local: str, tz: str) -> str:
@@ -128,10 +133,9 @@ def upsert_activities(activities: list[dict]) -> dict:
 
         latlng = act.get("start_latlng") or []
         start_lat = latlng[0] if len(latlng) >= 2 else None
-        start_lng = latlng[1] if len(latlng) >= 2 else None
+        start_long = latlng[1] if len(latlng) >= 2 else None
 
-        speed = act.get("average_speed")
-        avg_pace = (1000.0 / speed) if speed and speed > 0 else None
+        avg_speed = act.get("average_speed")  # m/s — matches garmin_activities.avg_speed
 
         if canonical_id:
             # Duplicate path: fill in normalized_power and local_timezone ONLY if
@@ -171,17 +175,18 @@ def upsert_activities(activities: list[dict]) -> dict:
                 "start_time": start_utc,
                 "local_timezone": tz,
                 "distance": act.get("distance"),
-                "duration": act.get("moving_time"),
-                "ascent": act.get("total_elevation_gain"),
-                "descent": act.get("total_elevation_loss"),
-                "avg_hr": act.get("average_heartrate"),
-                "max_hr": act.get("max_heartrate"),
-                "avg_pace": avg_pace,
-                "avg_cadence": act.get("average_cadence"),
+                "moving_time_seconds": _to_int(act.get("moving_time")),
+                "elapsed_time_seconds": _to_int(act.get("elapsed_time")),
+                "ascent": _to_int(act.get("total_elevation_gain")),
+                "descent": _to_int(act.get("total_elevation_loss")),
+                "avg_hr": _to_int(act.get("average_heartrate")),
+                "max_hr": _to_int(act.get("max_heartrate")),
+                "avg_speed": avg_speed,
+                "avg_cadence": _to_int(act.get("average_cadence")),
                 "normalized_power": act.get("normalized_power"),
-                "active_load": act.get("icu_training_load"),
+                "training_load": act.get("icu_training_load"),
                 "start_lat": start_lat,
-                "start_lng": start_lng,
+                "start_long": start_long,
             }, on_conflict="activity_id").execute()
 
             supabase.table("activity_sources").upsert({
