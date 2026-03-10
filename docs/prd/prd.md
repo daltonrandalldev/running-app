@@ -496,6 +496,58 @@ individual tolerance.
                                             Queryable for any date range.
   -----------------------------------------------------------------------
 
+## 4.5 Clarifications
+
+The following decisions were made during Phase 1 planning (2026-03-09) to
+resolve open questions in the Section 4 specification.
+
+- **PQ-1 — TSS Source:** The monotony pipeline reads `garmin_activities.active_load`
+  directly, summing per calendar day (identical to `pmcRecalc.ts`). No pre-aggregated
+  view is introduced. For the combined series, sport weights from `pmcRecalc.ts`
+  apply: W_RUN = 1.0, W_CYCLE = 0.5. Per-sport series (run, cycle) use raw
+  `active_load` without sport weighting, matching the PMC pipeline's sport-specific
+  path.
+
+- **PQ-2 — Standard Deviation Convention:** Population standard deviation (N=7)
+  is used, matching Foster (1998). When stdev = 0 (all seven daily loads are
+  identical), monotony is stored as NULL and strain is stored as the weekly load
+  sum (i.e., no multiplication by an undefined monotony value). A NULL monotony
+  value will not trigger any alert. This prevents a divide-by-zero error while
+  accurately representing that a week of perfectly identical loads is a degenerate
+  edge case, not a high-monotony signal.
+
+- **PQ-3 — Partial Window Behavior:** Monotony and strain are only computed once
+  a full 7-day window is available. Days 1–6 from the first activity date produce
+  NULL for both metrics. This matches the spirit of Foster 1998 (7-day window
+  is fundamental to the formula) and prevents misleading values during the initial
+  data accumulation period.
+
+- **PQ-4 — Storage Table:** A dedicated `daily_monotony_strain` table is created
+  (one row per athlete × date × sport), following the `daily_pmc_values` naming
+  pattern. A shared catch-all `calculated_metrics` table is not used — the
+  dedicated table provides a cleaner schema, explicit column types (monotony FLOAT,
+  strain FLOAT), and a clear conflict-target for upserts. The requirements table
+  reference to "calculated_metrics table" is superseded by this decision.
+
+- **PQ-5 — Adaptive Threshold Scope:** The adaptive correlation model (correlating
+  high-strain weeks with subsequent EF decline) is deferred to a future ticket.
+  The initial implementation uses static thresholds only: monotony > 2.0 AND
+  strain > the athlete's rolling 90-day strain average × 1.5. The 90-day rolling
+  strain average is computed from rows in `daily_monotony_strain`. If fewer than
+  90 days of strain history exist, the multiplier applies to the available average
+  (no static fallback threshold is used for the first 3 months — the system simply
+  requires enough history to compute a non-NULL 90-day average before alerting).
+
+- **PQ-6 — Alert Delivery:** Alerts are persisted to the existing `athlete_notifications`
+  table, extending the `type` CHECK constraint to include `'high_monotony_strain'`.
+  Severity is encoded as a `confidence_label`-style field reusing the existing
+  column: 'High' severity maps to monotony > 2.0 AND strain > 1.5x threshold
+  (alert fires); 'Medium' maps to a warning-only state (monotony between 1.8–2.0,
+  approaching threshold — no alert yet, informational only, stored for UI display).
+  Compute-only (non-persistent) UI calculation is not used — persistence is
+  consistent with the PMC-006 notifications pattern and enables historical alert
+  review.
+
 # 5. Running: Aerobic Decoupling & Cardiac Drift
 
 ## 5.1 Objective

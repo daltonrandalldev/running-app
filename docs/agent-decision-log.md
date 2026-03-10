@@ -570,3 +570,123 @@ Open-Meteo returns a static elevation value for any lat/lng point based on a dig
 **Impact:**
 - PRD: Section 21.4 updated to specify Open-Meteo elevation field as altitude source; "GPS altitude" language replaced with "Open-Meteo elevation_m"; elevation_m added to activity_weather column list
 - TDD: none — TDD not yet written
+
+---
+
+## [2026-03-09] Section 4 — TSS Source and Sport Weighting for Monotony Pipeline
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-1
+
+**Decision:**
+The monotony pipeline reads `garmin_activities.active_load` directly, summing per calendar day, with no pre-aggregated view. The combined series applies sport weights W_RUN=1.0 and W_CYCLE=0.5 from `pmcRecalc.ts`; per-sport series use raw `active_load` without weighting, matching the PMC pipeline's sport-specific path.
+
+**Rationale:**
+Reading directly from `garmin_activities.active_load` and summing per day is the established pattern in `pmcRecalc.ts`. Introducing a pre-aggregated view would add schema complexity for no analytical gain. Reusing the existing sport weights preserves consistency across the combined PMC and combined monotony series — the athlete's combined load signal should be weighted identically everywhere.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-1 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Standard Deviation Convention and Zero-StDev Edge Case
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-2
+
+**Decision:**
+Population standard deviation (N=7) is used, matching Foster (1998). When stdev=0 (all seven daily loads are identical), monotony is stored as NULL and strain is stored as the weekly load sum without the monotony multiplier. A NULL monotony value does not trigger any alert.
+
+**Rationale:**
+Foster 1998 uses population stdev over the N=7 window — using sample stdev (N-1=6) would produce systematically inflated monotony values that diverge from the published research. The zero-stdev case is a degenerate edge that should not produce infinite monotony; storing NULL is the honest representation and prevents false alerts. Strain is still informative when monotony is undefined (a week of uniformly high load is still taxing), so storing the weekly sum rather than NULL preserves that signal.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-2 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Partial Window Behavior: Full 7-Day Window Required
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-3
+
+**Decision:**
+Monotony and strain are only computed once a full 7-day window is available. Days 1–6 from the first activity date produce NULL for both metrics.
+
+**Rationale:**
+Foster 1998 defines the metric over a 7-day window; partial windows would produce values that are not comparable to the published thresholds (e.g., a 3-day "monotony" of 2.1 is not the same construct as a 7-day monotony of 2.1). Emitting partial values would require special-casing in the alert logic and UI. Requiring the full window is simpler and scientifically correct. This is consistent with how the PMC pipeline withholds meaningful CTL/ATL values until enough history accumulates.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-3 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Storage Table: Dedicated daily_monotony_strain
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-4
+
+**Decision:**
+A dedicated `daily_monotony_strain` table is created (one row per athlete × date × sport). The requirements table reference to "calculated_metrics table" is superseded. No shared catch-all table is used.
+
+**Rationale:**
+Every other Section in this PRD uses a dedicated named table: `daily_pmc_values`, `activity_decoupling`, `activity_ef`, `activity_gap`. A shared `calculated_metrics` table would mix metrics with different shapes, conflict targets, and query patterns, making indexing and upsert logic harder to reason about. A dedicated table named `daily_monotony_strain` follows the established convention, provides explicit column types (`monotony FLOAT`, `strain FLOAT`), and makes the upsert conflict target (`athlete_id, date, sport`) unambiguous.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-4 added; Section 4.4 requirements table reference to "calculated_metrics table" superseded
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Adaptive Threshold Deferred; Static 90-Day Rolling Average Used
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-5
+
+**Decision:**
+The adaptive ML correlation model (correlating high-strain weeks with subsequent EF decline to learn individual tolerance) is deferred to a future ticket. The initial implementation uses only static thresholds: monotony > 2.0 AND strain > 90-day rolling average × 1.5. No static fallback for athletes with fewer than 90 days of history — the alert simply does not fire until a 90-day rolling average is computable.
+
+**Rationale:**
+Implementing the adaptive correlation model requires at least 3 months of paired monotony and EF decline data to produce a statistically meaningful signal. Building the correlation machinery before sufficient data exists would produce a brittle model prone to false positives. Deferring keeps the initial ticket scope bounded and deliverable. The 90-day rolling average × 1.5 threshold is a reasonable population-level proxy until individual adaptation data accumulates. Not using a static 3-month fallback avoids generating alert noise for athletes who haven't trained consistently — an athlete with sparse data in their first 3 months should not receive high-strain alerts based on an unreliable baseline.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-5 added; Section 4.3 adaptive threshold language updated to make ML correlation explicitly deferred
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Alert Delivery: Persist to athlete_notifications with Extended Type
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-6
+
+**Decision:**
+Alerts are persisted to the existing `athlete_notifications` table by extending the `type` CHECK constraint to include `'high_monotony_strain'`. Severity is encoded using the existing `confidence_label` column: 'High' for monotony > 2.0 AND strain > 1.5x threshold (alert fires); 'Medium' for a warning-only state (monotony between 1.8–2.0, approaching threshold). Compute-only (non-persistent) UI calculation is not used.
+
+**Rationale:**
+Reusing `athlete_notifications` follows the PMC-006 precedent — notifications from the fitting pipeline already live there. Extending the type enum is a minimal schema change (one new CHECK value, no new table, no new migration file). Persisting alerts enables historical alert review in the UI and prevents the same alert from being regenerated on every page load. Using the existing `confidence_label` column for severity avoids adding a new column; the 'High'/'Medium' semantics map cleanly to the alert vs. warning distinction without overloading the column's meaning beyond its current pattern.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-6 added
+- TDD: none
