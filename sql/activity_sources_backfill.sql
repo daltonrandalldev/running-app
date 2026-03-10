@@ -23,7 +23,7 @@ SELECT
     'garmin'             AS source_platform,
     ga.activity_id       AS external_id,
     ga.start_time        AS start_time,
-    ga.sport_type        AS sport_type,
+    ga.sport             AS sport_type,
     true                 AS is_preferred
 FROM garmin_activities ga
 WHERE ga.source_platform = 'garmin'
