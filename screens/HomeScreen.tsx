@@ -245,7 +245,7 @@ function toActivity(row: any): Activity {
     name: row.name,
     start_time: row.start_time,
     activity_type: row.sport,
-    distance_km: row.distance,
+    distance_km: row.distance != null ? row.distance / 1000 : null,
     duration_seconds: row.moving_time_seconds ?? row.elapsed_time_seconds,
     avg_pace_min_per_km: row.avg_pace_seconds != null ? row.avg_pace_seconds / 60 : null,
     avg_hr: row.avg_hr,
