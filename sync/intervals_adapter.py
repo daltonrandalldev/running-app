@@ -134,12 +134,21 @@ def upsert_activities(activities: list[dict]) -> dict:
         avg_pace = (1000.0 / speed) if speed and speed > 0 else None
 
         if canonical_id:
-            # Duplicate path: fill in normalized_power and local_timezone if missing
+            # Duplicate path: fill in normalized_power and local_timezone ONLY if
+            # the existing GarminDB row has NULL values for those fields.
+            existing_row = (
+                supabase.table("garmin_activities")
+                .select("normalized_power, local_timezone")
+                .eq("activity_id", canonical_id)
+                .limit(1)
+                .execute()
+            ).data
             updates = {}
-            if act.get("normalized_power") is not None:
-                updates["normalized_power"] = act["normalized_power"]
-            if tz:
-                updates["local_timezone"] = tz
+            if existing_row:
+                if existing_row[0].get("normalized_power") is None and act.get("normalized_power") is not None:
+                    updates["normalized_power"] = act["normalized_power"]
+                if existing_row[0].get("local_timezone") is None and tz:
+                    updates["local_timezone"] = tz
             if updates:
                 supabase.table("garmin_activities").update(updates).eq("activity_id", canonical_id).execute()
 

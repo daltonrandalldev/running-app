@@ -75,18 +75,39 @@ Length)
 ## 1.1 Objective
 
 Establish a manufacturer-agnostic data pipeline that ingests,
-normalizes, and stores activity data from Garmin, Zwift, and future
-sources into a unified schema. All downstream calculations depend on
-this layer.
+normalizes, and stores activity data from Garmin, Zwift, Intervals.icu,
+and future sources into a unified schema. All downstream calculations
+depend on this layer.
 
 ## 1.2 Background
 
-Current state: GarminDB API integration is working. Zwift data is
-available via .fit file export. The system must handle heterogeneous
-data formats (FIT, TCX, GPX, CSV) with varying field availability across
-devices and platforms.
+Current state: GarminDB API integration is working and syncs activity
+data directly into the `garmin_activities` Supabase table.
+Intervals.icu is a first-class data source: it aggregates activities
+from Garmin (via connect sync), Zwift (via direct integration), and
+other platforms, and exposes them through the Intervals.icu API
+(https://intervals.icu/api). Zwift activities are ingested via
+Intervals.icu — not via .fit file export — because Intervals.icu
+provides a unified API endpoint for all activity data including Zwift
+power streams. The system must handle heterogeneous data formats (FIT,
+TCX, GPX, CSV) with varying field availability across devices and
+platforms.
 
 ## 1.3 Data Sources & Fields
+
+**Active data sources:**
+
+- **GarminDB** — primary source for Garmin device activities. Syncs to
+  `garmin_activities` table via the existing GarminDB pipeline.
+
+- **Intervals.icu API** — first-class unified source. Aggregates Garmin
+  (via Garmin Connect sync), Zwift, and other platforms. Supports
+  activity listing, per-activity streams (HR, power, pace, cadence,
+  elevation, lat/lng), and wellness data (HRV, sleep, weight). API
+  endpoint: https://intervals.icu/api/v1/athlete/{id}/activities.
+
+- **Zwift** — ingested exclusively via Intervals.icu API. Virtual
+  elevation flagged as virtual; GPS coordinates absent (NULL).
 
 **Required per-activity fields:**
 
@@ -98,7 +119,7 @@ devices and platforms.
 
 - Elevation (gain, loss, per-record stream)
 
-- GPS coordinates (lat/lng stream)
+- GPS coordinates (lat/lng stream) — NULL for indoor/virtual activities
 
 - Cadence (running: spm; cycling: rpm)
 
@@ -107,6 +128,10 @@ devices and platforms.
 - Temperature (from device or external weather API backfill)
 
 **Running dynamics (Garmin-specific, optional but high-value):**
+
+All running dynamics fields are optional with NULL allowed. Availability
+depends on the specific Garmin watch model in use; confirmation of exact
+available fields is deferred to implementation.
 
 - Ground contact time (ms)
 
@@ -118,9 +143,15 @@ devices and platforms.
 
 **Daily health metrics:**
 
+Available from both GarminDB and Intervals.icu wellness API. Stored in
+the `daily_health` table (to be created — see 1.4).
+
 - Resting heart rate
 
-- HRV (RMSSD or Garmin's HRV Status)
+- HRV: stored as two separate columns — `hrv_rmssd` (RMSSD in ms, from
+  GarminDB or Intervals.icu if available) and `hrv_status` (Garmin
+  proprietary 1–5 scale, if available). Either or both may be NULL
+  depending on device and source.
 
 - Sleep (total, deep, light, REM, awake minutes)
 
@@ -130,66 +161,124 @@ devices and platforms.
 
 - Stress score (Garmin Body Battery / stress level)
 
-**\[REVIEW\]** Confirm exact HRV metric exported by GarminDB (RMSSD vs.
-proprietary score vs. HRV status). Different Garmin devices export
-different HRV representations. Need to verify which format is available
-from your specific watch model.
-
 ## 1.4 Storage Schema Design
 
-Use a relational schema (SQLite for local, Postgres for deployed). Key
-tables:
+Use Postgres (Supabase). The following table inventory reflects what has
+been built and what still needs to be created.
 
-- activities: one row per activity. sport_type, start_time, duration,
-  distance, avg_hr, max_hr, avg_pace, elevation_gain, elevation_loss,
-  avg_cadence, avg_power, normalized_power, TSS, source_platform
+**Already built (do not recreate):**
 
-- activity_streams: time-series data. activity_id, timestamp, hr, pace,
-  power, cadence, elevation, lat, lng, gct, vertical_osc, temperature
+- `garmin_activities` — canonical activity table. This is the PRD's
+  "activities" table in practice. One row per activity from GarminDB.
+  Key columns include sport_type, start_time, duration, distance,
+  avg_hr, max_hr, avg_pace, elevation_gain (ascent), elevation_loss
+  (descent), avg_cadence, active_load (TSS equivalent), start_lat,
+  start_lng, is_race, race_detection_source, k_race_applied,
+  effective_tss_race. Additional columns will be added by Section 1
+  tickets rather than replacing this table.
 
-- daily_health: date, resting_hr, hrv_value, hrv_metric_type,
-  sleep_total, sleep_deep, sleep_light, sleep_rem, sleep_awake, weight,
-  spo2, stress_score
+- `athletes` — single-athlete record (id UUID, created_at). Profile
+  fields (FTP_cycling, threshold_pace_running, max_hr,
+  resting_hr_baseline, hr_zones, pace_zones, power_zones) will be added
+  as columns to this table. A separate `athlete_profile` table is not
+  needed.
 
-- athlete_profile: weight, FTP_cycling, threshold_pace_running, max_hr,
-  resting_hr_baseline, hr_zones (array), pace_zones (array), power_zones
-  (array)
+- `athlete_parameters` — adaptive model parameters (tc_fitness,
+  tc_fatigue, k1, k2, intercept, is_personalized, r_squared,
+  n_benchmarks, ci_*, heat_sensitivity_k). Exists. No changes needed
+  from Section 1.
 
-- athlete_parameters: adaptive model parameters (decay constants,
-  recovery rates, personal coefficients) --- updated by learning
-  algorithms
+- `daily_pmc_values` — PMC outputs (CTL, ATL, TSB) per athlete/date/sport.
 
-- calculated_metrics: date, CTL, ATL, TSB, ACWR_run, ACWR_cycle,
-  ACWR_combined, monotony, strain, injury_risk_score, training_phase
+- `daily_monotony_strain` — monotony and strain per athlete/date/sport.
+
+- `activity_decoupling`, `decoupling_baseline`, `decoupling_trend` — aerobic decoupling outputs.
+
+- `activity_ef`, `daily_ef_trend` — efficiency factor outputs.
+
+- `activity_gap`, `lap_gap` — grade adjusted pace outputs.
+
+- `activity_weather` — weather data per activity from Open-Meteo.
+
+- `athlete_notifications` — notification/alert records.
+
+- `parameter_change_log`, `benchmark_efforts`, `race_entries` — supporting tables.
+
+Note: The generic `calculated_metrics` table described in earlier PRD
+drafts is superseded. All calculated outputs are stored in the
+per-section dedicated tables listed above.
+
+**To be created by Section 1 tickets:**
+
+- `activity_sources` — deduplication tracking table. One row per source
+  instance of an activity. Columns: id, canonical_activity_id (FK to
+  garmin_activities), source_platform (text), external_id (text),
+  start_time (timestamptz), sport_type (text), is_preferred (boolean),
+  raw_data_ref (text). Enables multi-source deduplication without
+  modifying the canonical activity record.
+
+- `activity_streams` — per-second time-series data per activity.
+  Columns: id, activity_id (FK to garmin_activities), timestamp
+  (timestamptz), hr (int), pace_sec_per_km (float), power_watts (float),
+  cadence (int), elevation_m (float), lat (float), lng (float),
+  gct_ms (int), vertical_osc_cm (float), temperature_c (float).
+  NOTE: Syncing per-second streams to Supabase is optional and
+  resource-intensive (~150 MB for 500 activities). This table is
+  schema-ready but population is deferred until explicit sync decisions
+  are made. Lap-level data in `garmin_activity_laps` is the current
+  computation source for all analytics.
+
+- `daily_health` — daily wellness metrics. Columns: id, athlete_id (FK
+  to athletes), date (date), resting_hr (int), hrv_rmssd (float),
+  hrv_status (int), sleep_total_min (int), sleep_deep_min (int),
+  sleep_light_min (int), sleep_rem_min (int), sleep_awake_min (int),
+  weight_kg (float), spo2_pct (float), stress_score (int). Sources:
+  GarminDB and/or Intervals.icu wellness API.
 
 ## 1.5 Requirements
 
   -----------------------------------------------------------------------
   **Requirement**                           **Acceptance Criteria**
   ----------------------------------------- -----------------------------
-  Ingest Garmin .fit files via GarminDB API All fields listed in 1.3 that
+  Ingest Garmin activities via GarminDB API All fields listed in 1.3 that
   with all available fields including       exist in device data are
-  running dynamics and daily health         parsed and stored. Missing
+  running dynamics and daily health         parsed and stored in
+                                            garmin_activities. Missing
                                             fields stored as NULL, not
-                                            zero.
+                                            zero. Running dynamics fields
+                                            are optional (NULL allowed).
 
-  Ingest Zwift .fit files via manual upload Power, HR, cadence, duration,
-  or auto-sync                              distance extracted. Virtual
-                                            elevation handled correctly
-                                            (flag as virtual).
+  Ingest Zwift activities via               Power, HR, cadence, duration,
+  Intervals.icu API                         distance extracted. Virtual
+                                            elevation flagged as virtual.
+                                            GPS coordinates stored as NULL
+                                            for Zwift activities.
+
+  Ingest activities and wellness data via   Activities synced to
+  Intervals.icu API as a first-class        garmin_activities with
+  source alongside GarminDB                 source_platform =
+                                            'intervals_icu'. Wellness
+                                            data (HRV, sleep, weight)
+                                            synced to daily_health table.
 
   Normalize all timestamps to UTC with      No timezone-related ordering
   local timezone stored separately          bugs. Activities queryable by
                                             both UTC and local time.
 
-  Stream data resampled to 1-second         Interpolation used for gaps
-  intervals for consistency                 \<5s. Gaps \>5s flagged as
+  Stream data resampled to 1-second         activity_streams schema
+  intervals for consistency (deferred       created. Population deferred
+  population)                               until sync strategy confirmed.
+                                            Interpolation used for gaps
+                                            <5s. Gaps >5s flagged as
                                             paused/stopped segments.
 
-  Deduplication: same activity from         Matching by start_time ±30s +
-  multiple sources identified and merged    sport_type. User can choose
-                                            preferred source
-                                            per-activity.
+  Deduplication: same activity from         Matching by start_time ±5
+  multiple sources identified and merged    minutes + same sport_type.
+                                            activity_sources table tracks
+                                            all source versions. User can
+                                            designate preferred source per
+                                            activity via is_preferred
+                                            flag.
 
   Schema supports future data sources       source_platform field is
   (Wahoo, Strava API, manual entry) without extensible. New sources
@@ -198,18 +287,25 @@ tables:
 
   Weather data backfill for outdoor         Temperature, humidity, wind
   activities using GPS + timestamp          speed, precipitation stored
-                                            per-activity. Source:
-                                            Open-Meteo historical API or
-                                            similar.
+                                            per-activity in
+                                            activity_weather table.
+                                            Source: Open-Meteo historical
+                                            API. Indoor/virtual activities
+                                            (NULL start_lat/start_lng)
+                                            skipped.
   -----------------------------------------------------------------------
 
-**\[UNKNOWN\]** Zwift data export method --- do you currently export
-.fit files manually, use a Zwift API integration, or pull from a
-third-party aggregator (e.g., Strava)? This affects the ingestion
-adapter design.
+**Note on Garmin watch model:** The specific Garmin watch model in use
+has not been confirmed. All running dynamics fields (ground contact
+time, vertical oscillation, GCT balance, running power) are treated as
+optional with NULL allowed. Field availability will be verified during
+implementation of the Garmin ingestion adapter.
 
-**\[UNKNOWN\]** Which Garmin watch model? Needed to confirm running
-dynamics and HRV field availability.
+**Note on HRV:** The `daily_health` table stores both `hrv_rmssd`
+(RMSSD in ms, available from GarminDB or Intervals.icu wellness API
+where supported) and `hrv_status` (Garmin proprietary 1–5 scale, where
+available). Either column may be NULL depending on device model and data
+source. Both columns are populated when available.
 
 # 2. Performance Management Chart --- Adaptive Fitness/Fatigue/Form
 
