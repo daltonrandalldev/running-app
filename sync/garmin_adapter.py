@@ -77,6 +77,11 @@ def upsert_daily_health(garmin_db, since_date: Optional[date]) -> int:
     Reads DailySummary, Sleep, and BodyComposition from GarminDB and upserts
     into daily_health with source_platform = 'garmin'.
 
+    The union of all three tables' date sets is iterated so that days with
+    sleep or body-composition data but no DailySummary row are never silently
+    dropped (acceptance criterion #2: "where available from GarminDB monitoring
+    tables").
+
     Returns the number of rows upserted.
     """
     from garmindb.garmindb import DailySummary, Sleep
@@ -85,21 +90,18 @@ def upsert_daily_health(garmin_db, since_date: Optional[date]) -> int:
     count = 0
 
     with garmin_db.managed_session() as session:
-        query = session.query(DailySummary)
+        # ── Load all three tables into day-keyed dicts ─────────────────────
+        ds_query = session.query(DailySummary)
         if since_date:
-            query = query.filter(DailySummary.day >= since_date)
-        daily_rows = query.order_by(DailySummary.day).all()
+            ds_query = ds_query.filter(DailySummary.day >= since_date)
+        daily_by_day = {d.day: d for d in ds_query.all()}
 
-        if not daily_rows:
-            return 0
-
-        # Build a lookup of sleep rows keyed by day for O(1) access
         sleep_query = session.query(Sleep)
         if since_date:
             sleep_query = sleep_query.filter(Sleep.day >= since_date)
         sleep_by_day = {s.day: s for s in sleep_query.all()}
 
-        # Attempt to load BodyComposition — not available in all GarminDB versions
+        # BodyComposition is not available in all GarminDB versions
         body_comp_by_day = {}
         try:
             from garmindb.garmindb import BodyComposition
@@ -110,21 +112,24 @@ def upsert_daily_health(garmin_db, since_date: Optional[date]) -> int:
         except Exception:
             logger.debug("BodyComposition table not available in this GarminDB version — weight will be NULL")
 
-        for d in daily_rows:
-            day_str = d.day.isoformat()
+        # ── Union all date sets so no available data is dropped ────────────
+        all_days = sorted(daily_by_day.keys() | sleep_by_day.keys() | body_comp_by_day.keys())
 
-            # Resting HR from DailySummary.rhr
-            resting_hr = _i(d.rhr)
+        if not all_days:
+            return 0
+
+        for day in all_days:
+            day_str = day.isoformat()
+
+            # DailySummary fields (may be absent for this day)
+            d = daily_by_day.get(day)
+            resting_hr = _i(d.rhr) if d is not None else None
+            spo2_pct = _f(d.spo2_avg) if d is not None else None
+            stress_score = _i(d.stress_avg) if d is not None else None
 
             # HRV: GarminDB does not reliably export HRV RMSSD or status
             hrv_rmssd: Optional[float] = None
             hrv_status: Optional[int] = None
-
-            # SpO2 from DailySummary.spo2_avg
-            spo2_pct = _f(d.spo2_avg)
-
-            # Stress from DailySummary.stress_avg
-            stress_score = _i(d.stress_avg)
 
             # Sleep fields
             sleep_total_min = None
@@ -133,7 +138,7 @@ def upsert_daily_health(garmin_db, since_date: Optional[date]) -> int:
             sleep_rem_min = None
             sleep_awake_min = None
 
-            sleep_row = sleep_by_day.get(d.day)
+            sleep_row = sleep_by_day.get(day)
             if sleep_row is not None:
                 sleep_total_min = _time_to_minutes(sleep_row.total_sleep)
                 sleep_deep_min = _time_to_minutes(sleep_row.deep_sleep)
@@ -143,7 +148,7 @@ def upsert_daily_health(garmin_db, since_date: Optional[date]) -> int:
 
             # Weight from BodyComposition if available
             weight_kg = None
-            bc_row = body_comp_by_day.get(d.day)
+            bc_row = body_comp_by_day.get(day)
             if bc_row is not None:
                 try:
                     weight_kg = _f(bc_row.weight)
