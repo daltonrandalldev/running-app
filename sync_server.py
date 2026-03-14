@@ -65,6 +65,8 @@ class SyncHandler(BaseHTTPRequestHandler):
             self._run_sync()
         elif self.path == "/sync/intervals":
             self._run_intervals_sync()
+        elif self.path == "/sync/intervals/streams/backfill":
+            self._run_intervals_streams_backfill()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -141,6 +143,21 @@ class SyncHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "activities_upserted": act_result["count"],
                 "wellness_upserted":   well_result["count"],
+            })
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            self._json({"ok": False, "error": str(e)}, 500)
+
+    def _run_intervals_streams_backfill(self):
+        try:
+            from sync.intervals_adapter import backfill_cycling_streams
+            result = backfill_cycling_streams()
+            self._json({
+                "ok": True,
+                "activities_found":      result["activities_found"],
+                "activities_backfilled": result["activities_backfilled"],
+                "rows_total":            result["rows_total"],
             })
         except ValueError as e:
             self._json({"ok": False, "error": str(e)}, 400)

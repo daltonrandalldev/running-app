@@ -113,8 +113,142 @@ def _to_utc(start_date_local: str, tz: str) -> str:
         return start_date_local  # fallback: return as-is if conversion fails
 
 
+def _is_cycling(sport_type: str) -> bool:
+    """Returns True for cycling sport types from Intervals.icu."""
+    if not sport_type:
+        return False
+    lower = sport_type.lower()
+    return any(kw in lower for kw in ("cycl", "bike", "ride"))
+
+
+def fetch_activity_streams(icu_numeric_id: str, start_time_utc: str) -> list[dict]:
+    """
+    Fetches per-second stream data for a single Intervals.icu activity.
+    Returns a list of row dicts ready for upsert into activity_streams.
+    Running-only columns (gct_ms, vertical_osc_cm) are always NULL.
+    """
+    data = _get(f"activities/{icu_numeric_id}/streams")
+
+    time_offsets = data.get("time", [])
+    watts        = data.get("watts", [])
+    heartrate    = data.get("heartrate", [])
+    cadence      = data.get("cadence", [])
+    altitude     = data.get("altitude", [])
+    velocity     = data.get("velocity_smooth", [])
+    lats         = data.get("lat", [])
+    lngs         = data.get("lng", [])
+
+    start_dt = datetime.fromisoformat(start_time_utc.replace("Z", "+00:00"))
+    rows = []
+
+    for i, offset in enumerate(time_offsets):
+        ts = start_dt + timedelta(seconds=offset)
+
+        v = velocity[i] if i < len(velocity) else None
+        pace = (1000.0 / v) if v and v > 0 else None
+
+        rows.append({
+            "activity_id":     None,          # filled in by upsert_streams()
+            "timestamp":       ts.isoformat(),
+            "hr":              heartrate[i] if i < len(heartrate) else None,
+            "pace_sec_per_km": pace,
+            "power_watts":     float(watts[i]) if i < len(watts) and watts[i] is not None else None,
+            "cadence":         cadence[i] if i < len(cadence) else None,
+            "elevation_m":     float(altitude[i]) if i < len(altitude) and altitude[i] is not None else None,
+            "lat":             float(lats[i]) if i < len(lats) and lats[i] is not None else None,
+            "lng":             float(lngs[i]) if i < len(lngs) and lngs[i] is not None else None,
+            "gct_ms":          None,
+            "vertical_osc_cm": None,
+        })
+
+    return rows
+
+
+def upsert_streams(canonical_activity_id: str, rows: list[dict]) -> int:
+    """
+    Upserts stream rows for a single activity.
+    Returns the total number of rows processed.
+    """
+    CHUNK = 500
+    supabase = _get_supabase()
+    for row in rows:
+        row["activity_id"] = canonical_activity_id
+
+    for i in range(0, len(rows), CHUNK):
+        chunk = rows[i : i + CHUNK]
+        supabase.table("activity_streams").upsert(
+            chunk, on_conflict="activity_id,timestamp"
+        ).execute()
+
+    return len(rows)
+
+
+def backfill_cycling_streams() -> dict:
+    """
+    Backfills activity_streams for all Intervals.icu cycling activities
+    that have no stream data yet.
+    Returns {activities_found, activities_backfilled, rows_total}.
+    """
+    supabase = _get_supabase()
+    result = (
+        supabase.table("garmin_activities")
+        .select("activity_id, sport, start_time")
+        .like("activity_id", "icu_%")
+        .execute()
+    )
+    candidates = [r for r in result.data if _is_cycling(r.get("sport", ""))]
+
+    activities_found = len(candidates)
+    activities_backfilled = 0
+    rows_total = 0
+
+    for row in candidates:
+        canonical_id = row["activity_id"]     # e.g. "icu_A12345678"
+
+        # Skip if streams already exist for this activity
+        existing = (
+            supabase.table("activity_streams")
+            .select("id")
+            .eq("activity_id", canonical_id)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            continue
+
+        icu_numeric_id = canonical_id[len("icu_"):]   # strip "icu_" prefix
+        start_time_utc = row["start_time"]
+
+        try:
+            stream_rows = fetch_activity_streams(icu_numeric_id, start_time_utc)
+            n = upsert_streams(canonical_id, stream_rows)
+            rows_total += n
+            activities_backfilled += 1
+        except Exception as e:
+            print(f"[WARN] backfill stream fetch failed for {canonical_id}: {e}")
+
+    return {
+        "activities_found":      activities_found,
+        "activities_backfilled": activities_backfilled,
+        "rows_total":            rows_total,
+    }
+
+
 def upsert_activities(activities: list[dict]) -> dict:
     supabase = _get_supabase()
+
+    # Read the flag once before the loop
+    flag_result = (
+        supabase.table("athletes")
+        .select("activity_streams_enabled")
+        .limit(1)
+        .execute()
+    )
+    streams_enabled = (
+        flag_result.data[0]["activity_streams_enabled"]
+        if flag_result.data else False
+    )
+
     count = 0
     for act in activities:
         icu_id = str(act.get("id", ""))
@@ -202,6 +336,15 @@ def upsert_activities(activities: list[dict]) -> dict:
                 "sport_type": sport_type,
                 "is_preferred": True,
             }, on_conflict="source_platform,external_id").execute()
+
+            if streams_enabled and _is_cycling(sport_type):
+                try:
+                    icu_numeric_id = icu_id          # e.g. "A12345678" (no icu_ prefix)
+                    stream_rows = fetch_activity_streams(icu_numeric_id, start_utc)
+                    upsert_streams(new_id, stream_rows)
+                except Exception as e:
+                    print(f"[WARN] stream fetch failed for {new_id}: {e}")
+
             count += 1
 
     return {"count": count}
