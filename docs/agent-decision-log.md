@@ -570,3 +570,263 @@ Open-Meteo returns a static elevation value for any lat/lng point based on a dig
 **Impact:**
 - PRD: Section 21.4 updated to specify Open-Meteo elevation field as altitude source; "GPS altitude" language replaced with "Open-Meteo elevation_m"; elevation_m added to activity_weather column list
 - TDD: none — TDD not yet written
+
+---
+
+## [2026-03-09] Section 4 — TSS Source and Sport Weighting for Monotony Pipeline
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-1
+
+**Decision:**
+The monotony pipeline reads `garmin_activities.active_load` directly, summing per calendar day, with no pre-aggregated view. The combined series applies sport weights W_RUN=1.0 and W_CYCLE=0.5 from `pmcRecalc.ts`; per-sport series use raw `active_load` without weighting, matching the PMC pipeline's sport-specific path.
+
+**Rationale:**
+Reading directly from `garmin_activities.active_load` and summing per day is the established pattern in `pmcRecalc.ts`. Introducing a pre-aggregated view would add schema complexity for no analytical gain. Reusing the existing sport weights preserves consistency across the combined PMC and combined monotony series — the athlete's combined load signal should be weighted identically everywhere.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-1 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Standard Deviation Convention and Zero-StDev Edge Case
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-2
+
+**Decision:**
+Population standard deviation (N=7) is used, matching Foster (1998). When stdev=0 (all seven daily loads are identical), monotony is stored as NULL and strain is stored as the weekly load sum without the monotony multiplier. A NULL monotony value does not trigger any alert.
+
+**Rationale:**
+Foster 1998 uses population stdev over the N=7 window — using sample stdev (N-1=6) would produce systematically inflated monotony values that diverge from the published research. The zero-stdev case is a degenerate edge that should not produce infinite monotony; storing NULL is the honest representation and prevents false alerts. Strain is still informative when monotony is undefined (a week of uniformly high load is still taxing), so storing the weekly sum rather than NULL preserves that signal.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-2 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Partial Window Behavior: Full 7-Day Window Required
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-3
+
+**Decision:**
+Monotony and strain are only computed once a full 7-day window is available. Days 1–6 from the first activity date produce NULL for both metrics.
+
+**Rationale:**
+Foster 1998 defines the metric over a 7-day window; partial windows would produce values that are not comparable to the published thresholds (e.g., a 3-day "monotony" of 2.1 is not the same construct as a 7-day monotony of 2.1). Emitting partial values would require special-casing in the alert logic and UI. Requiring the full window is simpler and scientifically correct. This is consistent with how the PMC pipeline withholds meaningful CTL/ATL values until enough history accumulates.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-3 added
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Storage Table: Dedicated daily_monotony_strain
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-4
+
+**Decision:**
+A dedicated `daily_monotony_strain` table is created (one row per athlete × date × sport). The requirements table reference to "calculated_metrics table" is superseded. No shared catch-all table is used.
+
+**Rationale:**
+Every other Section in this PRD uses a dedicated named table: `daily_pmc_values`, `activity_decoupling`, `activity_ef`, `activity_gap`. A shared `calculated_metrics` table would mix metrics with different shapes, conflict targets, and query patterns, making indexing and upsert logic harder to reason about. A dedicated table named `daily_monotony_strain` follows the established convention, provides explicit column types (`monotony FLOAT`, `strain FLOAT`), and makes the upsert conflict target (`athlete_id, date, sport`) unambiguous.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-4 added; Section 4.4 requirements table reference to "calculated_metrics table" superseded
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Adaptive Threshold Deferred; Static 90-Day Rolling Average Used
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-5
+
+**Decision:**
+The adaptive ML correlation model (correlating high-strain weeks with subsequent EF decline to learn individual tolerance) is deferred to a future ticket. The initial implementation uses only static thresholds: monotony > 2.0 AND strain > 90-day rolling average × 1.5. No static fallback for athletes with fewer than 90 days of history — the alert simply does not fire until a 90-day rolling average is computable.
+
+**Rationale:**
+Implementing the adaptive correlation model requires at least 3 months of paired monotony and EF decline data to produce a statistically meaningful signal. Building the correlation machinery before sufficient data exists would produce a brittle model prone to false positives. Deferring keeps the initial ticket scope bounded and deliverable. The 90-day rolling average × 1.5 threshold is a reasonable population-level proxy until individual adaptation data accumulates. Not using a static 3-month fallback avoids generating alert noise for athletes who haven't trained consistently — an athlete with sparse data in their first 3 months should not receive high-strain alerts based on an unreliable baseline.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-5 added; Section 4.3 adaptive threshold language updated to make ML correlation explicitly deferred
+- TDD: none
+
+---
+
+## [2026-03-09] Section 4 — Alert Delivery: Persist to athlete_notifications with Extended Type
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 4
+**Agent:** TPM Agent
+**Triggered by:** TPM Agent analysis — product question PQ-6
+
+**Decision:**
+Alerts are persisted to the existing `athlete_notifications` table by extending the `type` CHECK constraint to include `'high_monotony_strain'`. Severity is encoded using the existing `confidence_label` column: 'High' for monotony > 2.0 AND strain > 1.5x threshold (alert fires); 'Medium' for a warning-only state (monotony between 1.8–2.0, approaching threshold). Compute-only (non-persistent) UI calculation is not used.
+
+**Rationale:**
+Reusing `athlete_notifications` follows the PMC-006 precedent — notifications from the fitting pipeline already live there. Extending the type enum is a minimal schema change (one new CHECK value, no new table, no new migration file). Persisting alerts enables historical alert review in the UI and prevents the same alert from being regenerated on every page load. Using the existing `confidence_label` column for severity avoids adding a new column; the 'High'/'Medium' semantics map cleanly to the alert vs. warning distinction without overloading the column's meaning beyond its current pattern.
+
+**Impact:**
+- PRD: Section 4.5 clarification PQ-6 added
+- TDD: none
+
+---
+
+## [2026-03-10] Section 1 — Zwift Ingestion via Intervals.icu API
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** [UNKNOWN] marker — Zwift data export method unresolved
+
+**Decision:**
+Zwift activities are ingested exclusively via the Intervals.icu API. Zwift has a direct integration with Intervals.icu that syncs completed rides automatically. The ingestion adapter for Zwift is the same Intervals.icu API adapter used for all other Intervals.icu-sourced activities. Manual .fit file export from Zwift is not the ingestion path.
+
+**Rationale:**
+Intervals.icu aggregates Zwift activities automatically via its Zwift integration, making .fit file exports unnecessary. Using Intervals.icu as the unified ingestion endpoint for Zwift avoids building and maintaining a separate Zwift adapter. This is consistent with Intervals.icu's role as a first-class unified source for the platform.
+
+**Impact:**
+- PRD: Section 1.2 updated; [UNKNOWN] Zwift export marker removed; Section 1.3 data sources updated; Section 1.5 requirements row for Zwift updated to reference Intervals.icu API ingestion
+- TDD: Zwift ingestion adapter is a subset of the Intervals.icu adapter, not a separate component
+
+---
+
+## [2026-03-10] Section 1 — Garmin Watch Model: Treat Running Dynamics as Optional
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** [UNKNOWN] marker — Garmin watch model unresolved
+
+**Decision:**
+The specific Garmin watch model is not confirmed at this stage. All running dynamics fields (ground contact time, vertical oscillation, GCT balance, running power) are treated as optional with NULL allowed in the schema. Field availability will be verified during implementation of the Garmin ingestion adapter. The [UNKNOWN] is converted to a [REVIEW] note deferred to implementation.
+
+**Rationale:**
+Blocking the Section 1 design on watch model confirmation is unnecessary — the schema already accommodates optional fields via NULL. The ingestion adapter can detect and populate available fields dynamically from the FIT file records. Deferring confirmation to implementation is the lowest-risk approach and consistent with how the codebase handles variable device data.
+
+**Impact:**
+- PRD: [UNKNOWN] Garmin watch model marker removed; Section 1.3 running dynamics note updated to state all fields are optional/NULL-allowed; Section 1.5 Garmin ingestion acceptance criteria updated
+- TDD: Running dynamics fields in garmin_activities and activity_streams are all nullable; adapter must not error on absence of any dynamics field
+
+---
+
+## [2026-03-10] Section 1 — HRV Storage: Two Columns (hrv_rmssd and hrv_status)
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** [REVIEW] marker — exact HRV metric exported by GarminDB unresolved
+
+**Decision:**
+The `daily_health` table stores HRV as two separate columns: `hrv_rmssd` (RMSSD in milliseconds, from GarminDB or Intervals.icu wellness API) and `hrv_status` (Garmin proprietary 1–5 readiness scale, from GarminDB where available). Both columns are nullable; either or both may be populated depending on watch model and data source.
+
+**Rationale:**
+Different Garmin devices export different HRV representations: newer models (e.g., Forerunner 965, Fenix 7) export raw RMSSD values; older models export only the derived HRV Status score. Intervals.icu wellness API can provide RMSSD if the device syncs it. Storing both columns avoids discarding data from either source and allows downstream analytics (Section 17 HRV Analysis) to use whichever field is available. Storing only one would require a lossy choice.
+
+**Impact:**
+- PRD: [REVIEW] HRV marker removed; Section 1.3 daily health metrics updated to describe two-column HRV storage; Section 1.4 daily_health table schema updated with hrv_rmssd and hrv_status columns; note added at end of Section 1.5
+- TDD: daily_health migration must include hrv_rmssd FLOAT and hrv_status INT, both nullable
+
+---
+
+## [2026-03-10] Section 1 — Schema Reconciliation: garmin_activities Is the Canonical Activity Table
+
+**Type:** Product Decision
+**Section:** Section 1
+**Phase:** Phase 1
+**Agent:** TPM Agent
+**Triggered by:** PRD described a generic "activities" table that does not match what has been built; downstream tables and pipelines all reference garmin_activities
+
+**Decision:**
+The PRD's generic `activities` table is superseded by `garmin_activities`, which is the canonical activity table in Supabase. Section 1 tickets will add missing columns to `garmin_activities` and create new supporting tables (`activity_sources`, `activity_streams`, `daily_health`) rather than creating a separate `activities` table. The `athletes` table (currently bare: id UUID, created_at) will be extended with profile fields in place of a separate `athlete_profile` table.
+
+**Rationale:**
+`garmin_activities` is already in production use with data and is referenced by every existing pipeline (pmcRecalc.ts, decouplingRecalc.ts, efRecalc.ts, gapRecalc.ts, monotonyRecalc.ts, environmentalRecalc.ts). Creating a new `activities` table alongside it would require either a data migration or a dual-write pattern, adding significant complexity for no benefit. Extending the existing table with missing columns is the correct, least-disruptive path. The same applies to `athletes` vs. a new `athlete_profile` table.
+
+**Impact:**
+- PRD: Section 1.4 schema section completely rewritten to reflect actual built tables; garmin_activities named as canonical; athlete_profile table removed in favor of extending athletes table; calculated_metrics table supersession documented
+- TDD: No new activities table. All Section 1 tickets must reference garmin_activities for activity data.
+
+---
+
+## [2026-03-10] Section 1 — calculated_metrics Table Superseded by Per-Section Tables
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** PRD described a unified calculated_metrics table; it was never built; all sections implemented dedicated tables instead
+
+**Decision:**
+The `calculated_metrics` table described in the PRD (columns: date, CTL, ATL, TSB, ACWR_run, ACWR_cycle, ACWR_combined, monotony, strain, injury_risk_score, training_phase) is not built and will not be built. Its data is distributed across dedicated tables: daily_pmc_values (CTL/ATL/TSB), daily_monotony_strain (monotony/strain), and future per-section tables. Section 1 tickets must not create calculated_metrics.
+
+**Rationale:**
+Every analytics section (2–27) has independently implemented a dedicated named table following the same pattern: one table per metric family, with (athlete_id, date, sport) as the upsert key. A unified catch-all table would create heterogeneous column shapes, conflicting upsert targets, and mixed query patterns. The per-section table pattern is now the established convention across the entire codebase.
+
+**Impact:**
+- PRD: Section 1.4 calculated_metrics entry replaced with a note that the metric is distributed across per-section tables; list of existing dedicated tables provided
+- TDD: No calculated_metrics table in any Section 1 migration
+
+---
+
+## [2026-03-10] Section 1 — Deduplication Window Changed to ±5 Minutes
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** User requirement: change deduplication window from ±30 seconds to ±5 minutes
+
+**Decision:**
+The deduplication matching window is ±5 minutes on start_time (not ±30 seconds). Same sport_type is still required. An `activity_sources` table tracks all source versions of a deduplicated activity. The user can designate a preferred source per activity via the `is_preferred` boolean on `activity_sources`.
+
+**Rationale:**
+The ±30s window was too tight for cross-source matching: a Garmin Connect sync to Intervals.icu may record a start_time offset of 1–3 minutes relative to the GarminDB-synced record due to timezone rounding, sync lag, or device clock drift. A ±5-minute window reliably catches the same activity across GarminDB and Intervals.icu sources while remaining tight enough to never match two genuinely different activities (back-to-back workouts are unlikely to start within 5 minutes of each other).
+
+**Impact:**
+- PRD: Section 1.5 deduplication requirement updated from ±30s to ±5 minutes; activity_sources table added to Section 1.4 schema; acceptance criteria updated
+- TDD: Deduplication query must use ABS(EXTRACT(EPOCH FROM (a.start_time - b.start_time))) < 300 AND a.sport_type = b.sport_type
+
+---
+
+## [2026-03-10] Section 1 — Intervals.icu Added as First-Class Data Source
+
+**Type:** Product Decision
+**Phase:** Phase 1
+**Section:** Section 1
+**Agent:** TPM Agent
+**Triggered by:** User requirement: add Intervals.icu as a first-class data source alongside Garmin and Zwift
+
+**Decision:**
+Intervals.icu is a named first-class data source for the platform. The Intervals.icu API (https://intervals.icu/api/v1) is used for: (1) activity ingestion — all activity types including Zwift; (2) wellness/health data ingestion — HRV (RMSSD), sleep, weight, and other wellness metrics via the /athlete/{id}/wellness endpoint. Activities ingested via Intervals.icu are stored in garmin_activities with source_platform = 'intervals_icu'. Wellness data is stored in the daily_health table.
+
+**Rationale:**
+Intervals.icu aggregates Garmin (via Garmin Connect), Zwift, and other platforms into a single authenticated API, providing a unified ingestion pathway that reduces the number of source-specific adapters needed. It also provides richer wellness/health data than GarminDB alone (RMSSD, sleep stages, weight). Designating it as a first-class source acknowledges its role as the de facto unified data hub for endurance athletes and future-proofs the ingestion layer.
+
+**Impact:**
+- PRD: Section 1.1 objective updated to name Intervals.icu; Section 1.2 background updated with Intervals.icu description and API endpoint; Section 1.3 data sources section restructured to list three named sources (GarminDB, Intervals.icu, Zwift-via-Intervals.icu); Section 1.5 requirements table updated with Intervals.icu ingestion row
+- TDD: Intervals.icu ingestion adapter required; must handle activity listing pagination, per-activity stream fetch, and wellness endpoint; authentication via API key

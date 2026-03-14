@@ -15,3 +15,22 @@ export async function triggerSync(): Promise<{ ok: boolean; error?: string }> {
     return { ok: false, error: e?.message ?? 'Sync server not reachable' };
   }
 }
+
+export async function triggerIntervalsSync(
+  oldest?: string,
+  newest?: string,
+): Promise<{ ok: boolean; activities_upserted?: number; wellness_upserted?: number; error?: string }> {
+  try {
+    const body: Record<string, string> = {};
+    if (oldest) body.oldest = oldest;
+    if (newest) body.newest = newest;
+    const res = await fetch(`${SYNC_SERVER_URL}/sync/intervals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await res.json();
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? 'Sync server not reachable' };
+  }
+}

@@ -17,7 +17,7 @@ import {
 type Props = NativeStackScreenProps<RootStackParamList, 'ActivityDetail'>;
 
 type ActivityDetail = {
-  id: number;
+  id: string;
   name: string;
   start_time: string;
   activity_type: string | null;
@@ -43,6 +43,8 @@ type ActivityDetail = {
   start_longitude: number | null;
   is_pr: boolean | null;
   is_favorite: boolean | null;
+  normalized_power: number | null;
+  avg_power: number | null;
   active_load: number | null;
   hrss: number | null;
   hr_tss: number | null;
@@ -86,6 +88,12 @@ function formatDateTime(iso: string) {
 
 function isRunning(type: string | null) {
   return type?.toLowerCase().includes('run') ?? false;
+}
+
+function isCycling(type: string | null) {
+  if (!type) return false;
+  const t = type.toLowerCase();
+  return t.includes('cycl') || t.includes('bike') || t.includes('ride');
 }
 
 function StatCard({ label, value }: { label: string; value: string | null }) {
@@ -134,14 +142,14 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           'activity_id, name, start_time, sport, moving_time_seconds, elapsed_time_seconds, ' +
           'distance, avg_pace_seconds, avg_speed, calories, avg_hr, max_hr, ascent, descent, ' +
           'avg_cadence, max_cadence, steps, avg_step_length, min_temperature, max_temperature, ' +
-          'start_lat, start_long, active_load, hrss, hr_tss, trimp, pace_load_flat, pace_load_gap, ' +
+          'start_lat, start_long, normalized_power, avg_power, active_load, hrss, hr_tss, trimp, pace_load_flat, pace_load_gap, ' +
           'is_race, race_detection_source, k_race_applied, effective_tss_race'
         )
         .eq('activity_id', activityId.toString())
         .single();
       if (data) {
         setActivity({
-          id: parseInt(data.activity_id, 10),
+          id: data.activity_id,
           name: data.name,
           start_time: data.start_time,
           activity_type: data.sport,
@@ -167,6 +175,8 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           start_longitude: data.start_long,
           is_pr: null,
           is_favorite: null,
+          normalized_power: data.normalized_power,
+          avg_power: data.avg_power,
           active_load: data.active_load,
           hrss: data.hrss,
           hr_tss: data.hr_tss,
@@ -391,6 +401,20 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
             value={activity.calories ? `${activity.calories} kcal` : null}
           />
         </Section>
+
+        {/* Power (cycling only) */}
+        {isCycling(activity.activity_type) && (activity.normalized_power != null || activity.avg_power != null) && (
+          <Section title="Power">
+            <StatCard
+              label="Normalized Power"
+              value={activity.normalized_power != null ? `${Math.round(activity.normalized_power)} W` : null}
+            />
+            <StatCard
+              label="Avg Power"
+              value={activity.avg_power != null ? `${Math.round(activity.avg_power)} W` : null}
+            />
+          </Section>
+        )}
 
         {/* Heart Rate */}
         <Section title="Heart Rate">
