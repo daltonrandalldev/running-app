@@ -67,6 +67,8 @@ try:
 except ImportError:
     sys.exit("Missing dependency — run: pip install garmindb")
 
+from sync.garmin_adapter import get_local_timezone, upsert_daily_health
+
 # ── Suppress noisy urllib3 SSL warning ───────────────────────────────────────
 import warnings
 import urllib3
@@ -149,6 +151,7 @@ def _build_activity_row(act, steps: Optional[object], cycle: Optional[object]) -
         "start_long":               _f(act.start_long),
         "stop_lat":                 _f(act.stop_lat),
         "stop_long":                _f(act.stop_long),
+        "local_timezone":           get_local_timezone(_f(act.start_lat), _f(act.start_long)),
         "training_load":            _f(act.training_load),
         "training_effect":          _f(act.training_effect),
         "anaerobic_training_effect": _f(act.anaerobic_training_effect),
@@ -626,7 +629,7 @@ def main():
         else:
             logger.info("No existing data in Supabase — syncing all data")
 
-    total_activities = total_laps = total_summaries = total_sleep = 0
+    total_activities = total_laps = total_summaries = total_sleep = total_health = 0
 
     try:
         with conn:
@@ -655,12 +658,18 @@ def main():
                 # ── Notify PostgREST ──────────────────────────────────────────
                 cur.execute("NOTIFY pgrst, 'reload schema'")
 
+        # ── daily_health upsert (uses Supabase client, outside psycopg2 tx) ───
+        logger.info("Syncing daily_health from GarminDB monitoring tables…")
+        total_health = upsert_daily_health(garmin_db, since_date)
+        logger.info("  ✓ %d daily_health rows upserted", total_health)
+
         logger.info("")
         logger.info("── Sync complete ────────────────────────────────────────")
         logger.info("  Activities:      %d", total_activities)
         logger.info("  Laps:            %d", total_laps)
         logger.info("  Daily summaries: %d", total_summaries)
         logger.info("  Sleep records:   %d", total_sleep)
+        logger.info("  Daily health:    %d", total_health)
 
     except Exception as exc:
         logger.error("Sync failed — transaction rolled back")
