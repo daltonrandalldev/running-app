@@ -135,7 +135,12 @@ def upsert_activities(activities: list[dict]) -> dict:
         start_lat = latlng[0] if len(latlng) >= 2 else None
         start_long = latlng[1] if len(latlng) >= 2 else None
 
-        avg_speed = act.get("average_speed")  # m/s — matches garmin_activities.avg_speed
+        # Normalise units to match GarminDB convention (km, kph)
+        raw_dist_m = act.get("distance")
+        distance_km = raw_dist_m / 1000.0 if raw_dist_m is not None else None
+
+        raw_speed_ms = act.get("average_speed")
+        avg_speed_kph = raw_speed_ms * 3.6 if raw_speed_ms is not None else None
 
         if canonical_id:
             # Duplicate path: fill in normalized_power and local_timezone ONLY if
@@ -174,14 +179,14 @@ def upsert_activities(activities: list[dict]) -> dict:
                 "sport": sport_type,
                 "start_time": start_utc,
                 "local_timezone": tz,
-                "distance": act.get("distance"),
+                "distance": distance_km,
                 "moving_time_seconds": _to_int(act.get("moving_time")),
                 "elapsed_time_seconds": _to_int(act.get("elapsed_time")),
                 "ascent": _to_int(act.get("total_elevation_gain")),
                 "descent": _to_int(act.get("total_elevation_loss")),
                 "avg_hr": _to_int(act.get("average_heartrate")),
                 "max_hr": _to_int(act.get("max_heartrate")),
-                "avg_speed": avg_speed,
+                "avg_speed": avg_speed_kph,
                 "avg_cadence": _to_int(act.get("average_cadence")),
                 "normalized_power": act.get("normalized_power"),
                 "training_load": act.get("icu_training_load"),

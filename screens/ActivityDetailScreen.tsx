@@ -146,7 +146,7 @@ export default function ActivityDetailScreen({ route, navigation }: Props) {
           start_time: data.start_time,
           activity_type: data.sport,
           duration_seconds: data.moving_time_seconds ?? data.elapsed_time_seconds,
-          distance_km: data.distance != null ? data.distance / 1000 : null,
+          distance_km: data.distance,
           avg_pace_min_per_km: data.avg_pace_seconds != null ? data.avg_pace_seconds / 60 : null,
           avg_speed_ms: data.avg_speed != null ? data.avg_speed / 3.6 : null,
           calories: data.calories,
